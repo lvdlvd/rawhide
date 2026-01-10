@@ -121,8 +121,11 @@ Useful for forensics when a filesystem has been deleted but data remains.
 Exposes any accessible file as a Linux Network Block Device:
 
 ```bash
-# Expose a partition as a block device
+# Expose a partition as a read-only block device
 fscat disk.img nbd p0
+
+# Enable read-write access
+fscat disk.img nbd -rw p0
 
 # With custom socket path and export name
 fscat disk.img nbd -socket /tmp/my.sock -name myexport p0
@@ -139,7 +142,11 @@ This allows you to mount nested images or partitions without extracting them fir
 Exposes concatenated free space as a block device:
 
 ```bash
+# Read-only (default)
 fscat disk.img freenbd -socket /tmp/free.sock
+
+# Read-write (allows writing to free space for forensic recovery)
+fscat disk.img freenbd -rw -socket /tmp/free.sock
 
 # Connect and scan for deleted data
 sudo nbd-client -N freespace -unix /tmp/free.sock /dev/nbd0

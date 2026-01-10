@@ -66,6 +66,94 @@ type ExtentReaderAt struct {
 	size    int64
 }
 
+// BaseReader returns the underlying reader
+func (e *ExtentReaderAt) BaseReader() io.ReaderAt {
+	return e.r
+}
+
+// Extents returns a copy of the extent map
+func (e *ExtentReaderAt) Extents() []Extent {
+	result := make([]Extent, len(e.extents))
+	copy(result, e.extents)
+	return result
+}
+
+// Size returns the logical size
+func (e *ExtentReaderAt) Size() int64 {
+	return e.size
+}
+
+// ExtentWriterAt wraps an io.WriterAt and a list of extents to provide
+// write access to a file's data through an extent map
+type ExtentWriterAt struct {
+	w       io.WriterAt
+	extents []Extent
+	size    int64
+}
+
+// NewExtentWriterAt creates a new ExtentWriterAt using the provided extents.
+// Typically the extents are borrowed from an ExtentReaderAt via its Extents() method.
+func NewExtentWriterAt(w io.WriterAt, extents []Extent, size int64) *ExtentWriterAt {
+	return &ExtentWriterAt{w: w, extents: extents, size: size}
+}
+
+// WriteAt implements io.WriterAt
+func (e *ExtentWriterAt) WriteAt(p []byte, off int64) (n int, err error) {
+	if off < 0 {
+		return 0, fmt.Errorf("negative offset")
+	}
+	if off >= e.size {
+		return 0, io.EOF
+	}
+
+	totalWritten := 0
+	remaining := p
+
+	for len(remaining) > 0 && off < e.size {
+		// Find extent containing this offset
+		var extent *Extent
+		for i := range e.extents {
+			if off >= e.extents[i].Logical && off < e.extents[i].Logical+e.extents[i].Length {
+				extent = &e.extents[i]
+				break
+			}
+		}
+
+		if extent == nil {
+			// In a gap (sparse region) - skip to next extent or end
+			nextStart := e.size
+			for _, ext := range e.extents {
+				if ext.Logical > off && ext.Logical < nextStart {
+					nextStart = ext.Logical
+				}
+			}
+			// Cannot write to sparse regions - return error
+			return totalWritten, fmt.Errorf("cannot write to sparse region at offset %d", off)
+		}
+
+		// Calculate how much we can write in this extent
+		offsetInExtent := off - extent.Logical
+		availableInExtent := extent.Length - offsetInExtent
+		toWrite := int64(len(remaining))
+		if toWrite > availableInExtent {
+			toWrite = availableInExtent
+		}
+
+		// Write to physical location
+		physicalOffset := extent.Physical + offsetInExtent
+		written, err := e.w.WriteAt(remaining[:toWrite], physicalOffset)
+		totalWritten += written
+		off += int64(written)
+		remaining = remaining[written:]
+
+		if err != nil {
+			return totalWritten, err
+		}
+	}
+
+	return totalWritten, nil
+}
+
 // NewExtentReaderAt creates a new ExtentReaderAt from a base reader and extents.
 // If the base reader is itself an ExtentReaderAt, the extents are composed
 // to create a flattened mapping directly to the underlying reader.
@@ -165,11 +253,6 @@ func ComposeExtents(outer, inner []Extent) []Extent {
 	}
 
 	return composed
-}
-
-// Size returns the logical size of the file
-func (e *ExtentReaderAt) Size() int64 {
-	return e.size
 }
 
 // ReadAt implements io.ReaderAt

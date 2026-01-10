@@ -222,3 +222,136 @@ func TestExtentReaderAtDeepNesting(t *testing.T) {
 		}
 	}
 }
+
+// bytesBuffer implements io.WriterAt for testing
+type bytesBuffer struct {
+	data []byte
+}
+
+func (b *bytesBuffer) WriteAt(p []byte, off int64) (int, error) {
+	if int(off)+len(p) > len(b.data) {
+		return 0, io.ErrShortWrite
+	}
+	copy(b.data[off:], p)
+	return len(p), nil
+}
+
+func (b *bytesBuffer) ReadAt(p []byte, off int64) (int, error) {
+	if off >= int64(len(b.data)) {
+		return 0, io.EOF
+	}
+	n := copy(p, b.data[off:])
+	if n < len(p) {
+		return n, io.EOF
+	}
+	return n, nil
+}
+
+func TestExtentWriterAt(t *testing.T) {
+	// Create base buffer: 1000 bytes
+	baseData := make([]byte, 1000)
+	base := &bytesBuffer{data: baseData}
+
+	// Create extent mapping: logical [0,200) -> physical [100,300)
+	extents := []Extent{{Logical: 0, Physical: 100, Length: 200}}
+	writer := NewExtentWriterAt(base, extents, 200)
+
+	// Write "Hello" at logical offset 0 (physical 100)
+	n, err := writer.WriteAt([]byte("Hello"), 0)
+	if err != nil {
+		t.Fatalf("WriteAt error: %v", err)
+	}
+	if n != 5 {
+		t.Errorf("Expected to write 5 bytes, got %d", n)
+	}
+
+	// Verify it was written at physical offset 100
+	if string(baseData[100:105]) != "Hello" {
+		t.Errorf("Expected 'Hello' at offset 100, got %q", baseData[100:105])
+	}
+
+	// Write at logical offset 50 (physical 150)
+	n, err = writer.WriteAt([]byte("World"), 50)
+	if err != nil {
+		t.Fatalf("WriteAt error: %v", err)
+	}
+	if string(baseData[150:155]) != "World" {
+		t.Errorf("Expected 'World' at offset 150, got %q", baseData[150:155])
+	}
+}
+
+func TestExtentWriterAtMultipleExtents(t *testing.T) {
+	// Create base buffer
+	baseData := make([]byte, 1000)
+	base := &bytesBuffer{data: baseData}
+
+	// Two extents: logical [0,100) -> physical [200,300), logical [100,200) -> physical [500,600)
+	extents := []Extent{
+		{Logical: 0, Physical: 200, Length: 100},
+		{Logical: 100, Physical: 500, Length: 100},
+	}
+	writer := NewExtentWriterAt(base, extents, 200)
+
+	// Write across extent boundary (90 bytes from offset 50)
+	// logical [50,140) spans [50,100) in first extent and [100,140) in second
+	data := make([]byte, 90)
+	for i := range data {
+		data[i] = byte(i + 1)
+	}
+
+	n, err := writer.WriteAt(data, 50)
+	if err != nil {
+		t.Fatalf("WriteAt error: %v", err)
+	}
+	if n != 90 {
+		t.Errorf("Expected to write 90 bytes, got %d", n)
+	}
+
+	// Verify first part: logical [50,100) -> physical [250,300)
+	for i := 0; i < 50; i++ {
+		expected := byte(i + 1)
+		if baseData[250+i] != expected {
+			t.Errorf("baseData[%d] = %d, want %d", 250+i, baseData[250+i], expected)
+		}
+	}
+
+	// Verify second part: logical [100,140) -> physical [500,540)
+	for i := 0; i < 40; i++ {
+		expected := byte(50 + i + 1)
+		if baseData[500+i] != expected {
+			t.Errorf("baseData[%d] = %d, want %d", 500+i, baseData[500+i], expected)
+		}
+	}
+}
+
+func TestExtentWriterAtBorrowFromReader(t *testing.T) {
+	// Test that we can borrow extents from an ExtentReaderAt
+	baseData := make([]byte, 1000)
+	for i := range baseData {
+		baseData[i] = byte(i % 256)
+	}
+	base := &bytesBuffer{data: baseData}
+
+	// Create reader with extents
+	extents := []Extent{{Logical: 0, Physical: 100, Length: 200}}
+	reader := NewExtentReaderAt(base, extents, 200)
+
+	// Borrow extents for writer
+	writer := NewExtentWriterAt(base, reader.Extents(), reader.Size())
+
+	// Write via writer
+	writer.WriteAt([]byte("TEST"), 10)
+
+	// Read back via reader
+	buf := make([]byte, 4)
+	reader.ReadAt(buf, 10)
+
+	if string(buf) != "TEST" {
+		t.Errorf("Expected 'TEST', got %q", buf)
+	}
+
+	// Also verify at physical location
+	if string(baseData[110:114]) != "TEST" {
+		t.Errorf("Expected 'TEST' at physical offset 110, got %q", baseData[110:114])
+	}
+}

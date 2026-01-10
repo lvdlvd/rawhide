@@ -2,14 +2,14 @@
 //
 // Usage:
 //
-//	fscat <image>                              - show filesystem info
-//	fscat <image> ls [-l] [path]              - list directory or file info
-//	fscat <image> cat <path>                  - copy file to stdout
-//	fscat <image> fscat <path> [cmd] [args]   - recurse into nested image
-//	fscat <image> freecat                     - copy free space to stdout
-//	fscat <image> freefscat [cmd] [args]      - probe free space as image
-//	fscat <image> nbd <path> [-socket path]   - expose file as NBD block device
-//	fscat <image> freenbd [-socket path]      - expose free space as NBD device
+//	fscat <image>                                  - show filesystem info
+//	fscat <image> ls [-l] [path]                  - list directory or file info
+//	fscat <image> cat <path>                      - copy file to stdout
+//	fscat <image> fscat <path> [cmd] [args]       - recurse into nested image
+//	fscat <image> freecat                         - copy free space to stdout
+//	fscat <image> freefscat [cmd] [args]          - probe free space as image
+//	fscat <image> nbd [-rw] <path> [-socket path] - expose file as NBD block device
+//	fscat <image> freenbd [-rw] [-socket path]    - expose free space as NBD device
 package main
 
 import (
@@ -269,6 +269,7 @@ func runNbd(filesystem fsys.FS, args []string, stdout, stderr io.Writer) error {
 	flagSet := flag.NewFlagSet("nbd", flag.ContinueOnError)
 	socketPath := flagSet.String("socket", "/tmp/nbd.sock", "Unix socket path")
 	exportName := flagSet.String("name", "export", "Export name for NBD clients")
+	readWrite := flagSet.Bool("rw", false, "Enable read-write access")
 	if err := flagSet.Parse(args); err != nil {
 		return err
 	}
@@ -283,7 +284,15 @@ func runNbd(filesystem fsys.FS, args []string, stdout, stderr io.Writer) error {
 		return err
 	}
 
-	return serveNbd(*socketPath, *exportName, reader, size, stdout, stderr)
+	var writer io.WriterAt
+	if *readWrite {
+		writer, err = getWriterForReader(reader)
+		if err != nil {
+			return fmt.Errorf("cannot enable write access: %w", err)
+		}
+	}
+
+	return serveNbd(*socketPath, *exportName, reader, writer, size, stdout, stderr)
 }
 
 // runFreeNbd exposes free space as an NBD block device
@@ -291,6 +300,7 @@ func runFreeNbd(filesystem fsys.FS, args []string, stdout, stderr io.Writer) err
 	flagSet := flag.NewFlagSet("freenbd", flag.ContinueOnError)
 	socketPath := flagSet.String("socket", "/tmp/nbd.sock", "Unix socket path")
 	exportName := flagSet.String("name", "freespace", "Export name for NBD clients")
+	readWrite := flagSet.Bool("rw", false, "Enable read-write access")
 	if err := flagSet.Parse(args); err != nil {
 		return err
 	}
@@ -323,16 +333,50 @@ func runFreeNbd(filesystem fsys.FS, args []string, stdout, stderr io.Writer) err
 	}
 
 	reader := fsys.NewExtentReaderAt(br.BaseReader(), extents, totalSize)
-	return serveNbd(*socketPath, *exportName, reader, totalSize, stdout, stderr)
+
+	var writer io.WriterAt
+	if *readWrite {
+		writer, err = getWriterForReader(reader)
+		if err != nil {
+			return fmt.Errorf("cannot enable write access: %w", err)
+		}
+	}
+
+	return serveNbd(*socketPath, *exportName, reader, writer, totalSize, stdout, stderr)
 }
 
-// serveNbd starts an NBD server with the given reader
-func serveNbd(socketPath, exportName string, reader io.ReaderAt, size int64, stdout, stderr io.Writer) error {
+// getWriterForReader creates a writer that uses the same extent map as the reader.
+// It requires the underlying base reader to be an *os.File so it can be re-opened for writing.
+func getWriterForReader(reader io.ReaderAt) (io.WriterAt, error) {
+	extReader, ok := reader.(*fsys.ExtentReaderAt)
+	if !ok {
+		return nil, fmt.Errorf("reader is not an ExtentReaderAt")
+	}
+
+	baseReader := extReader.BaseReader()
+	baseFile, ok := baseReader.(*os.File)
+	if !ok {
+		return nil, fmt.Errorf("base reader is not a file (nested read-write not supported through memory buffers)")
+	}
+
+	// Re-open the file in read-write mode
+	rwFile, err := os.OpenFile(baseFile.Name(), os.O_RDWR, 0)
+	if err != nil {
+		return nil, fmt.Errorf("opening file for writing: %w", err)
+	}
+
+	// Create ExtentWriterAt with the same extents
+	return fsys.NewExtentWriterAt(rwFile, extReader.Extents(), extReader.Size()), nil
+}
+
+// serveNbd starts an NBD server with the given reader and optional writer
+func serveNbd(socketPath, exportName string, reader io.ReaderAt, writer io.WriterAt, size int64, stdout, stderr io.Writer) error {
 	server := nbd.NewServer(socketPath)
 
 	exp := &nbd.Export{
 		Name:   exportName,
 		Reader: reader,
+		Writer: writer,
 		Size:   size,
 	}
 
@@ -349,8 +393,13 @@ func serveNbd(socketPath, exportName string, reader io.ReaderAt, size int64, std
 		server.Close()
 	}()
 
+	rwStr := "read-only"
+	if writer != nil {
+		rwStr = "read-write"
+	}
+
 	fmt.Fprintf(stdout, "NBD server starting on unix:%s\n", socketPath)
-	fmt.Fprintf(stdout, "Export: %s (%d bytes, read-only)\n", exportName, size)
+	fmt.Fprintf(stdout, "Export: %s (%d bytes, %s)\n", exportName, size, rwStr)
 	fmt.Fprintf(stdout, "Connect with: sudo nbd-client -N %s -unix %s /dev/nbdX\n", exportName, socketPath)
 	fmt.Fprintf(stdout, "Press Ctrl+C to stop\n")
 
