@@ -6,6 +6,7 @@ A command-line tool to read files from filesystem images (FAT12/16/32, NTFS, ext
 
 - **Multi-filesystem support**: FAT12, FAT16, FAT32, NTFS, ext2, ext3, ext4
 - **Partition table support**: MBR (DOS) and GPT partition tables
+- **Nested image access**: Access filesystem images stored within other images
 - **Automatic detection**: Identifies filesystem and partition table types via magic bytes
 - **Transparent partition access**: Navigate through partitions using paths like `p0/path/to/file`
 - **io/fs.FS compatible**: All filesystem implementations satisfy the standard Go `io/fs.FS` interface
@@ -109,6 +110,28 @@ This is useful for:
 - Data recovery and forensics
 - Understanding filesystem fragmentation
 - Partition table gap analysis
+
+#### `fscat` - Access nested filesystem images
+
+The `fscat` subcommand allows you to recursively access filesystem images stored within other images, without extracting them first:
+
+```bash
+# Access a filesystem image stored inside another image
+fscat outer.img fscat path/to/inner.img ls
+
+# Read a file from a nested image
+fscat outer.img fscat inner.img cat somefile.txt
+
+# Triple nesting through a partition table
+fscat disk.img fscat p0/backup.img fscat archive.img cat data.txt
+```
+
+This works efficiently using extent mapping - the inner image data is read directly from the outer image without loading the entire inner image into memory. You can nest arbitrarily deep:
+
+```bash
+# Deep nesting example
+fscat level0.img fscat level1.img fscat level2.img fscat level3.img ls
+```
 
 ## Working with Partitioned Disks
 

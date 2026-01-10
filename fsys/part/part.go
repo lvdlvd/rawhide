@@ -225,6 +225,11 @@ func (pfs *FS) Close() error {
 	return nil
 }
 
+// BaseReader returns the underlying ReaderAt
+func (pfs *FS) BaseReader() io.ReaderAt {
+	return pfs.r
+}
+
 // FreeBlocks returns the list of free byte ranges in the disk image.
 // For partition tables, free space is any area not covered by a partition.
 // This includes gaps between partitions and space before/after all partitions.
@@ -289,7 +294,71 @@ func (pfs *FS) FreeBlocks() ([]fsys.Range, error) {
 	return freeRanges, nil
 }
 
-// Partitions returns the list of partitions
+// FileExtents returns the physical extents for a file path.
+// For partition tables, this handles paths like "p0" (entire partition)
+// or "p0/path/to/file" (delegates to inner filesystem).
+func (pfs *FS) FileExtents(name string) ([]fsys.Extent, error) {
+	name = cleanPath(name)
+
+	if name == "." || name == "" {
+		return nil, fmt.Errorf("cannot get extents for root")
+	}
+
+	// Parse path to find partition and subpath
+	parts := strings.SplitN(name, "/", 2)
+	partName := parts[0]
+	subPath := ""
+	if len(parts) > 1 {
+		subPath = parts[1]
+	}
+
+	// Find partition
+	part := pfs.findPartition(partName)
+	if part == nil {
+		return nil, fmt.Errorf("partition not found: %s", partName)
+	}
+
+	// If no subpath, return the entire partition as one extent
+	if subPath == "" {
+		return []fsys.Extent{{
+			Logical:  0,
+			Physical: part.StartOffset(),
+			Length:   part.SizeBytes(),
+		}}, nil
+	}
+
+	// Delegate to inner filesystem
+	innerFS, err := pfs.openPartitionFS(part)
+	if err != nil {
+		return nil, fmt.Errorf("opening partition filesystem: %w", err)
+	}
+	defer innerFS.Close()
+
+	// Check if inner filesystem supports extent mapping
+	em, ok := innerFS.(fsys.ExtentMapper)
+	if !ok {
+		return nil, fmt.Errorf("filesystem in partition %s does not support extent mapping", partName)
+	}
+
+	// Get extents from inner filesystem
+	innerExtents, err := em.FileExtents(subPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// Adjust physical offsets by partition start
+	partOffset := part.StartOffset()
+	extents := make([]fsys.Extent, len(innerExtents))
+	for i, e := range innerExtents {
+		extents[i] = fsys.Extent{
+			Logical:  e.Logical,
+			Physical: e.Physical + partOffset,
+			Length:   e.Length,
+		}
+	}
+
+	return extents, nil
+}
 func (pfs *FS) Partitions() []*Partition {
 	return pfs.partitions
 }

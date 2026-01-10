@@ -9,27 +9,41 @@ import (
 )
 
 // Cat copies the contents of a file to the given writer.
+// When the filesystem supports extent mapping, it streams directly
+// from the underlying image without loading the file into memory.
 func Cat(filesystem fsys.FS, fsPath string, out io.Writer) error {
 	// Normalize path
 	fsPath = normalizePath(fsPath)
 
+	// Check if it's a directory
+	info, err := fs.Stat(filesystem, fsPath)
+	if err != nil {
+		return err
+	}
+	if info.IsDir() {
+		return fmt.Errorf("%s: is a directory", fsPath)
+	}
+
+	fileSize := info.Size()
+
+	// Try extent-based streaming first
+	if em, ok := filesystem.(fsys.ExtentMapper); ok {
+		if br, ok := filesystem.(interface{ BaseReader() io.ReaderAt }); ok {
+			extents, err := em.FileExtents(fsPath)
+			if err == nil && len(extents) > 0 {
+				reader := fsys.NewExtentReaderAt(br.BaseReader(), extents, fileSize)
+				return streamFromReaderAt(reader, fileSize, out)
+			}
+		}
+	}
+
+	// Fall back to standard file reading
 	file, err := filesystem.Open(fsPath)
 	if err != nil {
 		return err
 	}
 	defer file.Close()
 
-	// Check if it's a directory
-	info, err := file.Stat()
-	if err != nil {
-		return err
-	}
-
-	if info.IsDir() {
-		return fmt.Errorf("%s: is a directory", fsPath)
-	}
-
-	// Check if we can read
 	reader, ok := file.(io.Reader)
 	if !ok {
 		return fmt.Errorf("%s: cannot read file", fsPath)
@@ -37,6 +51,36 @@ func Cat(filesystem fsys.FS, fsPath string, out io.Writer) error {
 
 	_, err = io.Copy(out, reader)
 	return err
+}
+
+// streamFromReaderAt copies data from a ReaderAt to a Writer in chunks
+func streamFromReaderAt(r io.ReaderAt, size int64, out io.Writer) error {
+	const bufSize = 64 * 1024 // 64KB chunks
+	buf := make([]byte, bufSize)
+	offset := int64(0)
+
+	for offset < size {
+		toRead := int64(bufSize)
+		if offset+toRead > size {
+			toRead = size - offset
+		}
+
+		n, err := r.ReadAt(buf[:toRead], offset)
+		if n > 0 {
+			if _, werr := out.Write(buf[:n]); werr != nil {
+				return werr
+			}
+			offset += int64(n)
+		}
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return err
+		}
+	}
+
+	return nil
 }
 
 // Stat shows detailed information about a file or directory.

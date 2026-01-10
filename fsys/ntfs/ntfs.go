@@ -118,8 +118,9 @@ func (f *FS) parseBootSector(header []byte) error {
 	return nil
 }
 
-func (f *FS) Type() string { return "NTFS" }
-func (f *FS) Close() error { return nil }
+func (f *FS) Type() string  { return "NTFS" }
+func (f *FS) Close() error  { return nil }
+func (f *FS) BaseReader() io.ReaderAt { return f.r }
 
 // FreeBlocks returns the list of free byte ranges in the NTFS filesystem.
 // Free clusters are identified by 0 bits in the $Bitmap file.
@@ -192,6 +193,88 @@ func (f *FS) FreeBlocks() ([]fsys.Range, error) {
 	}
 
 	return ranges, nil
+}
+
+// FileExtents returns the physical extents for a file
+func (f *FS) FileExtents(name string) ([]fsys.Extent, error) {
+	if name == "." || name == "" {
+		return nil, fmt.Errorf("cannot get extents for root directory")
+	}
+
+	// Load MFT if needed
+	if err := f.loadMFT(); err != nil {
+		return nil, fmt.Errorf("loading MFT: %w", err)
+	}
+
+	recordNum, rec, _, err := f.lookup(name)
+	if err != nil {
+		return nil, err
+	}
+	_ = recordNum
+
+	// Check if it's a directory
+	if rec.flags&mftFlagDirectory != 0 {
+		return nil, fmt.Errorf("cannot get extents for directory")
+	}
+
+	// Find the $DATA attribute
+	attrs, err := f.parseAttributes(rec)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, attr := range attrs {
+		if attr.attrType == attrData && attr.name == "" {
+			return f.dataRunsToExtents(attr)
+		}
+	}
+
+	return nil, fmt.Errorf("no $DATA attribute found")
+}
+
+// dataRunsToExtents converts NTFS data runs to extents
+func (f *FS) dataRunsToExtents(attr attribute) ([]fsys.Extent, error) {
+	if !attr.nonResident {
+		// Resident data - it's stored in the MFT record itself
+		// We can't easily provide extents for this without knowing
+		// where in the MFT the record is, so return a special case
+		// Actually, we don't support this well - fall back to reporting
+		// that the file is too small / inline
+		return nil, fmt.Errorf("file data is resident in MFT (inline storage)")
+	}
+
+	var extents []fsys.Extent
+	clusterSize := int64(f.clusterSize)
+	logicalOffset := int64(0)
+	fileSize := int64(attr.realSize)
+	remaining := fileSize
+
+	for _, run := range attr.dataRuns {
+		if run.sparse {
+			// Sparse run - no physical location, just advance logical offset
+			logicalOffset += int64(run.length) * clusterSize
+			continue
+		}
+
+		runBytes := int64(run.length) * clusterSize
+		if runBytes > remaining {
+			runBytes = remaining
+		}
+
+		extents = append(extents, fsys.Extent{
+			Logical:  logicalOffset,
+			Physical: int64(run.offset) * clusterSize,
+			Length:   runBytes,
+		})
+
+		logicalOffset += int64(run.length) * clusterSize
+		remaining -= runBytes
+		if remaining <= 0 {
+			break
+		}
+	}
+
+	return extents, nil
 }
 
 func (f *FS) clusterOffset(cluster uint64) int64 {

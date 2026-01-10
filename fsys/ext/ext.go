@@ -174,8 +174,9 @@ func (f *FS) parseSuperblock(data []byte) error {
 	return nil
 }
 
-func (f *FS) Type() string { return f.typ }
-func (f *FS) Close() error { return nil }
+func (f *FS) Type() string  { return f.typ }
+func (f *FS) Close() error  { return nil }
+func (f *FS) BaseReader() io.ReaderAt { return f.r }
 
 // FreeBlocks returns the list of free byte ranges in the ext filesystem.
 // Free blocks are identified by 0 bits in the block bitmaps.
@@ -267,6 +268,179 @@ func mergeRanges(ranges []fsys.Range) []fsys.Range {
 	merged = append(merged, current)
 
 	return merged
+}
+
+// FileExtents returns the physical extents for a file
+func (f *FS) FileExtents(name string) ([]fsys.Extent, error) {
+	if name == "." || name == "" {
+		return nil, fmt.Errorf("cannot get extents for root directory")
+	}
+
+	inodeNum, ino, err := f.lookup(name)
+	if err != nil {
+		return nil, err
+	}
+	_ = inodeNum
+
+	// Check if it's a directory
+	if ino.mode&0xF000 == 0x4000 {
+		return nil, fmt.Errorf("cannot get extents for directory")
+	}
+
+	fileSize := int64(ino.size)
+	if ino.flags&inodeFlagExtents != 0 {
+		return f.getExtentTreeExtents(ino, fileSize)
+	}
+	return f.getBlockPointerExtents(ino, fileSize)
+}
+
+// getExtentTreeExtents returns extents from an extent tree
+func (f *FS) getExtentTreeExtents(ino inode, fileSize int64) ([]fsys.Extent, error) {
+	var extents []fsys.Extent
+	blockSize := int64(f.blockSize)
+	remaining := fileSize
+
+	err := f.walkExtentTree(ino.block[:], func(e extent) error {
+		if remaining <= 0 {
+			return io.EOF
+		}
+
+		startBlock := uint64(e.startLo) | (uint64(e.startHi) << 32)
+		length := uint16(e.len)
+		if length > 0x8000 {
+			length -= 0x8000 // Uninitialized extent
+		}
+
+		logicalBlock := uint64(e.block)
+		extentBytes := int64(length) * blockSize
+		if extentBytes > remaining {
+			extentBytes = remaining
+		}
+
+		extents = append(extents, fsys.Extent{
+			Logical:  int64(logicalBlock) * blockSize,
+			Physical: int64(startBlock) * blockSize,
+			Length:   extentBytes,
+		})
+
+		remaining -= extentBytes
+		return nil
+	})
+
+	if err != nil && err != io.EOF {
+		return nil, err
+	}
+
+	return extents, nil
+}
+
+// getBlockPointerExtents returns extents from block pointers
+func (f *FS) getBlockPointerExtents(ino inode, fileSize int64) ([]fsys.Extent, error) {
+	var extents []fsys.Extent
+	blockSize := int64(f.blockSize)
+	blocksNeeded := (fileSize + blockSize - 1) / blockSize
+	logicalOffset := int64(0)
+	remaining := fileSize
+
+	var currentExtent *fsys.Extent
+
+	addBlock := func(blockNum uint64) {
+		if remaining <= 0 {
+			return
+		}
+		physOffset := int64(blockNum) * blockSize
+		extentLen := blockSize
+		if extentLen > remaining {
+			extentLen = remaining
+		}
+
+		// Try to extend current extent if contiguous
+		if currentExtent != nil &&
+			currentExtent.Physical+currentExtent.Length == physOffset {
+			currentExtent.Length += extentLen
+		} else {
+			if currentExtent != nil {
+				extents = append(extents, *currentExtent)
+			}
+			currentExtent = &fsys.Extent{
+				Logical:  logicalOffset,
+				Physical: physOffset,
+				Length:   extentLen,
+			}
+		}
+		logicalOffset += extentLen
+		remaining -= extentLen
+	}
+
+	// Direct blocks (0-11)
+	for i := 0; i < 12 && logicalOffset/blockSize < blocksNeeded; i++ {
+		blockNum := binary.LittleEndian.Uint32(ino.block[i*4 : (i+1)*4])
+		if blockNum == 0 {
+			continue
+		}
+		addBlock(uint64(blockNum))
+	}
+
+	// Single indirect (12)
+	if logicalOffset/blockSize < blocksNeeded {
+		indirectBlock := binary.LittleEndian.Uint32(ino.block[48:52])
+		if indirectBlock != 0 {
+			if err := f.walkIndirectExtents(uint64(indirectBlock), 1, addBlock); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	// Double indirect (13)
+	if logicalOffset/blockSize < blocksNeeded {
+		doubleIndirectBlock := binary.LittleEndian.Uint32(ino.block[52:56])
+		if doubleIndirectBlock != 0 {
+			if err := f.walkIndirectExtents(uint64(doubleIndirectBlock), 2, addBlock); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	// Triple indirect (14)
+	if logicalOffset/blockSize < blocksNeeded {
+		tripleIndirectBlock := binary.LittleEndian.Uint32(ino.block[56:60])
+		if tripleIndirectBlock != 0 {
+			if err := f.walkIndirectExtents(uint64(tripleIndirectBlock), 3, addBlock); err != nil {
+				return nil, err
+			}
+		}
+	}
+
+	if currentExtent != nil {
+		extents = append(extents, *currentExtent)
+	}
+
+	return extents, nil
+}
+
+func (f *FS) walkIndirectExtents(block uint64, level int, addBlock func(uint64)) error {
+	blockData, err := f.readBlock(block)
+	if err != nil {
+		return err
+	}
+
+	pointersPerBlock := int(f.blockSize / 4)
+	for i := 0; i < pointersPerBlock; i++ {
+		ptr := binary.LittleEndian.Uint32(blockData[i*4 : (i+1)*4])
+		if ptr == 0 {
+			continue
+		}
+
+		if level == 1 {
+			addBlock(uint64(ptr))
+		} else {
+			if err := f.walkIndirectExtents(uint64(ptr), level-1, addBlock); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
 }
 
 func (f *FS) blockOffset(block uint64) int64 {

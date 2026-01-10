@@ -119,8 +119,9 @@ func (f *FS) parseBPB(header []byte) error {
 	return nil
 }
 
-func (f *FS) Type() string { return f.typ }
-func (f *FS) Close() error { return nil }
+func (f *FS) Type() string  { return f.typ }
+func (f *FS) Close() error  { return nil }
+func (f *FS) BaseReader() io.ReaderAt { return f.r }
 
 // FreeBlocks returns the list of free byte ranges in the FAT filesystem.
 // Free clusters are those with a FAT entry value of 0.
@@ -164,7 +165,90 @@ func (f *FS) FreeBlocks() ([]fsys.Range, error) {
 	return ranges, nil
 }
 
-// clusterToOffset converts a cluster number to a byte offset
+// FileExtents returns the physical extents for a file
+func (f *FS) FileExtents(name string) ([]fsys.Extent, error) {
+	if name == "." || name == "" {
+		return nil, fmt.Errorf("cannot get extents for directory")
+	}
+
+	entry, _, err := f.lookup(name)
+	if err != nil {
+		return nil, err
+	}
+
+	if entry.attr&attrDirectory != 0 {
+		return nil, fmt.Errorf("cannot get extents for directory")
+	}
+
+	return f.clusterChainExtents(entry.cluster, int64(entry.size))
+}
+
+// clusterChainExtents returns extents for a cluster chain
+func (f *FS) clusterChainExtents(startCluster uint32, fileSize int64) ([]fsys.Extent, error) {
+	if startCluster < 2 {
+		return nil, nil // Empty file
+	}
+
+	var extents []fsys.Extent
+	clusterSize := int64(f.clusterSize())
+	cluster := startCluster
+	logicalOffset := int64(0)
+	remaining := fileSize
+
+	// Track current extent for coalescing contiguous clusters
+	var currentExtent *fsys.Extent
+
+	for remaining > 0 {
+		physOffset := f.clusterToOffset(cluster)
+		extentLen := clusterSize
+		if extentLen > remaining {
+			extentLen = remaining
+		}
+
+		// Try to extend current extent if contiguous
+		if currentExtent != nil &&
+			currentExtent.Physical+currentExtent.Length == physOffset {
+			currentExtent.Length += extentLen
+		} else {
+			// Start new extent
+			if currentExtent != nil {
+				extents = append(extents, *currentExtent)
+			}
+			currentExtent = &fsys.Extent{
+				Logical:  logicalOffset,
+				Physical: physOffset,
+				Length:   extentLen,
+			}
+		}
+
+		logicalOffset += extentLen
+		remaining -= extentLen
+
+		if remaining <= 0 {
+			break
+		}
+
+		// Get next cluster
+		next, err := f.fat.next(cluster)
+		if err != nil {
+			return nil, fmt.Errorf("reading FAT entry for cluster %d: %w", cluster, err)
+		}
+
+		if f.fat.isEOF(next) {
+			break
+		}
+		if next < 2 || next >= f.bpb.countOfClusters+2 {
+			break
+		}
+		cluster = next
+	}
+
+	if currentExtent != nil {
+		extents = append(extents, *currentExtent)
+	}
+
+	return extents, nil
+}
 func (f *FS) clusterToOffset(cluster uint32) int64 {
 	return int64(f.bpb.firstDataSector)*int64(f.bpb.bytesPerSector) +
 		int64(cluster-2)*int64(f.bpb.sectorsPerCluster)*int64(f.bpb.bytesPerSector)

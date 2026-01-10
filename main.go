@@ -7,9 +7,11 @@
 //	fscat <image> stat <path>
 //	fscat <image> info
 //	fscat <image> free
+//	fscat <image> fscat <path/to/inner.img> <command> [args...]
 package main
 
 import (
+	"bytes"
 	"flag"
 	"fmt"
 	"io"
@@ -37,8 +39,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	}
 
 	imagePath := args[0]
-	command := args[1]
-	cmdArgs := args[2:]
+	cmdArgs := args[1:]
 
 	// Open image file
 	file, err := os.Open(imagePath)
@@ -69,7 +70,18 @@ func run(args []string, stdout, stderr io.Writer) error {
 	}
 	defer filesystem.Close()
 
-	// Execute command
+	return runCommand(filesystem, cmdArgs, stdout, stderr)
+}
+
+// runCommand executes a command against a filesystem, supporting recursive fscat
+func runCommand(filesystem fsys.FS, args []string, stdout, stderr io.Writer) error {
+	if len(args) < 1 {
+		return fmt.Errorf("missing command")
+	}
+
+	command := args[0]
+	cmdArgs := args[1:]
+
 	switch command {
 	case "ls":
 		return runLs(filesystem, cmdArgs, stdout)
@@ -78,12 +90,98 @@ func run(args []string, stdout, stderr io.Writer) error {
 	case "stat":
 		return runStat(filesystem, cmdArgs, stdout)
 	case "info":
-		return runInfo(filesystem, fsType, stdout)
+		return runInfo(filesystem, stdout)
 	case "free":
 		return runFree(filesystem, stdout)
+	case "fscat":
+		return runNestedFscat(filesystem, cmdArgs, stdout, stderr)
 	default:
-		return fmt.Errorf("unknown command: %s (use ls, cat, stat, info, or free)", command)
+		return fmt.Errorf("unknown command: %s (use ls, cat, stat, info, free, or fscat)", command)
 	}
+}
+
+// runNestedFscat handles the fscat subcommand for nested images
+func runNestedFscat(filesystem fsys.FS, args []string, stdout, stderr io.Writer) error {
+	if len(args) < 2 {
+		return fmt.Errorf("usage: fscat <path/to/inner.img> <command> [args...]")
+	}
+
+	innerPath := args[0]
+	remainingArgs := args[1:]
+
+	// Get file info to check it's not a directory and get size
+	info, err := filesystem.Stat(innerPath)
+	if err != nil {
+		return fmt.Errorf("stat inner image %s: %w", innerPath, err)
+	}
+	if info.IsDir() {
+		return fmt.Errorf("%s is a directory, not an image file", innerPath)
+	}
+
+	fileSize := info.Size()
+
+	// Try to get extents for zero-copy access
+	var reader io.ReaderAt
+
+	if em, ok := filesystem.(fsys.ExtentMapper); ok {
+		extents, err := em.FileExtents(innerPath)
+		if err == nil && len(extents) > 0 {
+			// Get the underlying ReaderAt from the filesystem
+			// We need to access the base reader - check if filesystem exposes it
+			if baseReader := getBaseReader(filesystem); baseReader != nil {
+				reader = fsys.NewExtentReaderAt(baseReader, extents, fileSize)
+			}
+		}
+	}
+
+	// Fall back to reading into memory if extent mapping didn't work
+	if reader == nil {
+		file, err := filesystem.Open(innerPath)
+		if err != nil {
+			return fmt.Errorf("opening inner image %s: %w", innerPath, err)
+		}
+		defer file.Close()
+
+		data, err := io.ReadAll(file.(io.Reader))
+		if err != nil {
+			return fmt.Errorf("reading inner image %s: %w", innerPath, err)
+		}
+		reader = bytes.NewReader(data)
+		fileSize = int64(len(data))
+	}
+
+	// Detect filesystem type
+	fsType, err := detect.Detect(reader)
+	if err != nil {
+		return fmt.Errorf("detecting filesystem in %s: %w", innerPath, err)
+	}
+
+	if fsType == detect.Unknown {
+		return fmt.Errorf("unknown or unsupported filesystem in %s", innerPath)
+	}
+
+	// Open the inner filesystem
+	innerFS, err := openFilesystem(reader, fileSize, fsType)
+	if err != nil {
+		return fmt.Errorf("opening filesystem in %s: %w", innerPath, err)
+	}
+	defer innerFS.Close()
+
+	// Recursively execute the command
+	return runCommand(innerFS, remainingArgs, stdout, stderr)
+}
+
+// ReaderAtExposer is an optional interface for filesystems that can expose their base reader
+type ReaderAtExposer interface {
+	BaseReader() io.ReaderAt
+}
+
+// getBaseReader attempts to get the underlying ReaderAt from a filesystem
+func getBaseReader(filesystem fsys.FS) io.ReaderAt {
+	if exp, ok := filesystem.(ReaderAtExposer); ok {
+		return exp.BaseReader()
+	}
+	return nil
 }
 
 func openFilesystem(r io.ReaderAt, size int64, fsType detect.Type) (fsys.FS, error) {
@@ -102,16 +200,16 @@ func openFilesystem(r io.ReaderAt, size int64, fsType detect.Type) (fsys.FS, err
 }
 
 func runLs(filesystem fsys.FS, args []string, out io.Writer) error {
-	fs := flag.NewFlagSet("ls", flag.ContinueOnError)
-	long := fs.Bool("l", false, "use long listing format")
-	all := fs.Bool("a", false, "show all files including system files")
-	if err := fs.Parse(args); err != nil {
+	flagSet := flag.NewFlagSet("ls", flag.ContinueOnError)
+	long := flagSet.Bool("l", false, "use long listing format")
+	all := flagSet.Bool("a", false, "show all files including system files")
+	if err := flagSet.Parse(args); err != nil {
 		return err
 	}
 
 	path := "."
-	if fs.NArg() > 0 {
-		path = fs.Arg(0)
+	if flagSet.NArg() > 0 {
+		path = flagSet.Arg(0)
 	}
 
 	return cmd.Ls(filesystem, path, out, cmd.LsOptions{
@@ -136,9 +234,8 @@ func runStat(filesystem fsys.FS, args []string, out io.Writer) error {
 	return cmd.Stat(filesystem, args[0], out)
 }
 
-func runInfo(filesystem fsys.FS, fsType detect.Type, out io.Writer) error {
+func runInfo(filesystem fsys.FS, out io.Writer) error {
 	fmt.Fprintf(out, "Filesystem type: %s\n", filesystem.Type())
-	fmt.Fprintf(out, "Detected as: %s\n", fsType)
 
 	// Show partition information if this is a partition table
 	if pfs, ok := filesystem.(*part.FS); ok {
@@ -149,7 +246,7 @@ func runInfo(filesystem fsys.FS, fsType detect.Type, out io.Writer) error {
 
 		for _, p := range partitions {
 			typeStr := part.PartitionTypeString(p)
-			fsType, _ := pfs.DetectPartitionFS(p)
+			detectedType, _ := pfs.DetectPartitionFS(p)
 			label := p.Label
 			if label == "" && p.Bootable {
 				label = "(bootable)"
@@ -159,7 +256,7 @@ func runInfo(filesystem fsys.FS, fsType detect.Type, out io.Writer) error {
 				typeStr,
 				p.StartLBA,
 				formatSize(p.SizeBytes()),
-				fsType,
+				detectedType,
 				label)
 		}
 	}
