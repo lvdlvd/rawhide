@@ -20,6 +20,8 @@ const (
 	Ext2
 	Ext3
 	Ext4
+	MBR // Master Boot Record partition table
+	GPT // GUID Partition Table
 )
 
 func (t Type) String() string {
@@ -38,6 +40,10 @@ func (t Type) String() string {
 		return "ext3"
 	case Ext4:
 		return "ext4"
+	case MBR:
+		return "MBR"
+	case GPT:
+		return "GPT"
 	default:
 		return "unknown"
 	}
@@ -53,6 +59,11 @@ func (t Type) IsExt() bool {
 	return t == Ext2 || t == Ext3 || t == Ext4
 }
 
+// IsPartitionTable returns true if the type is a partition table format
+func (t Type) IsPartitionTable() bool {
+	return t == MBR || t == GPT
+}
+
 // Detect identifies the filesystem type from a reader.
 // It reads the necessary header bytes to identify the filesystem.
 func Detect(r io.ReaderAt) (Type, error) {
@@ -64,6 +75,11 @@ func Detect(r io.ReaderAt) (Type, error) {
 	}
 	if n < 512 {
 		return Unknown, fmt.Errorf("file too small: %d bytes", n)
+	}
+
+	// Check for GPT (GUID Partition Table) - "EFI PART" at LBA 1 (offset 512)
+	if n >= 520 && bytes.Equal(header[512:520], []byte("EFI PART")) {
+		return GPT, nil
 	}
 
 	// Check NTFS first (offset 3: "NTFS    ")
@@ -80,12 +96,105 @@ func Detect(r io.ReaderAt) (Type, error) {
 		}
 	}
 
-	// Check for FAT boot sector signature
+	// Check for FAT boot sector signature or MBR partition table
 	if header[510] == 0x55 && header[511] == 0xAA {
+		// Check if this looks like a partition table (MBR)
+		// MBR has partition entries at offset 446-509
+		if isMBRPartitionTable(header) {
+			return MBR, nil
+		}
+		// Otherwise it's a FAT filesystem
 		return detectFATVersion(header), nil
 	}
 
 	return Unknown, nil
+}
+
+// isMBRPartitionTable checks if the boot sector contains a valid MBR partition table
+func isMBRPartitionTable(header []byte) bool {
+	if len(header) < 512 {
+		return false
+	}
+
+	// Check for at least one valid partition entry
+	// MBR partition table starts at offset 446, each entry is 16 bytes
+	validPartitions := 0
+	for i := 0; i < 4; i++ {
+		entry := header[446+i*16 : 446+(i+1)*16]
+
+		// Check boot flag (must be 0x00 or 0x80)
+		bootFlag := entry[0]
+		if bootFlag != 0x00 && bootFlag != 0x80 {
+			continue
+		}
+
+		// Check partition type (byte 4)
+		partType := entry[4]
+		if partType == 0x00 {
+			continue // Empty entry
+		}
+
+		// Check if it's a known partition type
+		if isKnownPartitionType(partType) {
+			// Verify LBA start and size are non-zero
+			lbaStart := binary.LittleEndian.Uint32(entry[8:12])
+			lbaSize := binary.LittleEndian.Uint32(entry[12:16])
+			if lbaStart > 0 && lbaSize > 0 {
+				validPartitions++
+			}
+		}
+	}
+
+	// If we have at least one valid partition, it's likely an MBR
+	// Also check that it doesn't look like a FAT BPB
+	if validPartitions > 0 {
+		// FAT has specific values at certain offsets
+		// Check if bytes 11-12 look like bytes per sector (usually 512, 1024, 2048, 4096)
+		bps := binary.LittleEndian.Uint16(header[11:13])
+		if bps == 512 || bps == 1024 || bps == 2048 || bps == 4096 {
+			// Could be FAT, check for FAT-specific strings
+			if bytes.Equal(header[54:59], []byte("FAT12")) ||
+				bytes.Equal(header[54:59], []byte("FAT16")) ||
+				bytes.Equal(header[82:87], []byte("FAT32")) {
+				return false // It's FAT
+			}
+			// Check sectors per cluster (byte 13) - valid values are 1,2,4,8,16,32,64,128
+			spc := header[13]
+			if spc == 1 || spc == 2 || spc == 4 || spc == 8 || spc == 16 || spc == 32 || spc == 64 || spc == 128 {
+				// Likely FAT without explicit label
+				return false
+			}
+		}
+		return true
+	}
+
+	return false
+}
+
+// isKnownPartitionType returns true if the partition type is recognized
+func isKnownPartitionType(t byte) bool {
+	switch t {
+	case 0x01, 0x04, 0x06, 0x0B, 0x0C, 0x0E: // FAT variants
+		return true
+	case 0x07: // NTFS/exFAT/HPFS
+		return true
+	case 0x0F, 0x05: // Extended partitions
+		return true
+	case 0x82: // Linux swap
+		return true
+	case 0x83: // Linux native
+		return true
+	case 0x8E: // Linux LVM
+		return true
+	case 0xEE: // GPT protective MBR
+		return true
+	case 0xEF: // EFI System Partition
+		return true
+	case 0xFD: // Linux RAID
+		return true
+	default:
+		return t >= 0x80 // Most values >= 0x80 are valid
+	}
 }
 
 // detectFATVersion distinguishes between FAT12, FAT16, and FAT32

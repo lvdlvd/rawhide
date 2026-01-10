@@ -20,6 +20,7 @@ import (
 	"github.com/luuk/fscat/fsys/ext"
 	"github.com/luuk/fscat/fsys/fat"
 	"github.com/luuk/fscat/fsys/ntfs"
+	"github.com/luuk/fscat/fsys/part"
 )
 
 func main() {
@@ -84,6 +85,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 
 func openFilesystem(r io.ReaderAt, size int64, fsType detect.Type) (fsys.FS, error) {
 	switch {
+	case fsType.IsPartitionTable():
+		return part.Open(r, size, fsType)
 	case fsType.IsFAT():
 		return fat.Open(r, size)
 	case fsType.IsExt():
@@ -133,5 +136,52 @@ func runStat(filesystem fsys.FS, args []string, out io.Writer) error {
 func runInfo(filesystem fsys.FS, fsType detect.Type, out io.Writer) error {
 	fmt.Fprintf(out, "Filesystem type: %s\n", filesystem.Type())
 	fmt.Fprintf(out, "Detected as: %s\n", fsType)
+
+	// Show partition information if this is a partition table
+	if pfs, ok := filesystem.(*part.FS); ok {
+		partitions := pfs.Partitions()
+		fmt.Fprintf(out, "\nPartitions: %d\n", len(partitions))
+		fmt.Fprintf(out, "\n%-6s %-12s %12s %12s %-20s %s\n",
+			"NAME", "TYPE", "START", "SIZE", "FSTYPE", "LABEL")
+
+		for _, p := range partitions {
+			typeStr := part.PartitionTypeString(p)
+			fsType, _ := pfs.DetectPartitionFS(p)
+			label := p.Label
+			if label == "" && p.Bootable {
+				label = "(bootable)"
+			}
+			fmt.Fprintf(out, "%-6s %-12s %12d %12s %-20s %s\n",
+				p.Name,
+				typeStr,
+				p.StartLBA,
+				formatSize(p.SizeBytes()),
+				fsType,
+				label)
+		}
+	}
+
 	return nil
+}
+
+func formatSize(bytes int64) string {
+	const (
+		KB = 1024
+		MB = KB * 1024
+		GB = MB * 1024
+		TB = GB * 1024
+	)
+
+	switch {
+	case bytes >= TB:
+		return fmt.Sprintf("%.1fT", float64(bytes)/TB)
+	case bytes >= GB:
+		return fmt.Sprintf("%.1fG", float64(bytes)/GB)
+	case bytes >= MB:
+		return fmt.Sprintf("%.1fM", float64(bytes)/MB)
+	case bytes >= KB:
+		return fmt.Sprintf("%.1fK", float64(bytes)/KB)
+	default:
+		return fmt.Sprintf("%dB", bytes)
+	}
 }

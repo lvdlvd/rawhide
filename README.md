@@ -1,11 +1,13 @@
 # fscat
 
-A command-line tool to read files from filesystem images (FAT12/16/32, NTFS, ext2/3/4) without mounting.
+A command-line tool to read files from filesystem images (FAT12/16/32, NTFS, ext2/3/4) without mounting. Also supports MBR and GPT partition tables, allowing direct access to files within partitioned disk images.
 
 ## Features
 
 - **Multi-filesystem support**: FAT12, FAT16, FAT32, NTFS, ext2, ext3, ext4
-- **Automatic detection**: Identifies filesystem type via magic bytes
+- **Partition table support**: MBR (DOS) and GPT partition tables
+- **Automatic detection**: Identifies filesystem and partition table types via magic bytes
+- **Transparent partition access**: Navigate through partitions using paths like `p0/path/to/file`
 - **io/fs.FS compatible**: All filesystem implementations satisfy the standard Go `io/fs.FS` interface
 - **Read-only**: Safe operation that never modifies the source image
 - **No root required**: Works without mounting or special privileges
@@ -73,6 +75,46 @@ fscat disk.img stat path/to/file
 fscat disk.img info
 ```
 
+For partitioned disks, this shows partition table details:
+
+```
+Filesystem type: GPT
+Detected as: GPT
+
+Partitions: 2
+
+NAME   TYPE                START         SIZE FSTYPE               LABEL
+p0     EFI System           2048        16.0M FAT32                EFI System
+p1     Basic Data          34816        31.0M ext4                 Data Partition
+```
+
+## Working with Partitioned Disks
+
+Partition tables (MBR and GPT) are treated as an outer quasi-filesystem where partitions appear as directories:
+
+```bash
+# List partitions in a disk image
+fscat disk.img ls
+# Output:
+# p0/
+# p1/
+# p2/
+
+# List files in partition 0
+fscat disk.img ls p0
+
+# Extract a file from partition 1
+fscat disk.img cat p1/home/user/document.txt > document.txt
+
+# Show info for the whole disk (lists partitions)
+fscat disk.img info
+
+# Get details about a specific partition's filesystem
+fscat disk.img ls -l p0
+```
+
+Paths are hierarchical: the partition name (p0, p1, etc.) comes first, followed by the path within that partition's filesystem.
+
 ## Examples
 
 ```bash
@@ -86,7 +128,11 @@ fscat linux-root.img ls -l home/user
 fscat unknown.img info
 ```
 
-## Supported Filesystem Details
+## Supported Formats
+
+### Partition Tables
+- **MBR (DOS)**: Up to 4 primary partitions, partition type detection
+- **GPT**: Full GUID partition support, partition labels, up to 128 entries
 
 ### FAT (FAT12, FAT16, FAT32)
 - Full directory traversal
@@ -111,10 +157,11 @@ The project uses a layered architecture:
 
 ```
 main.go          - CLI entry point
-├── detect/      - Filesystem type detection
+├── detect/      - Filesystem and partition table type detection
 ├── cmd/         - Command implementations (ls, cat, stat)
 └── fsys/        - Filesystem implementations
     ├── fsys.go  - Common interface (extends io/fs.FS)
+    ├── part/    - Partition tables (MBR, GPT)
     ├── fat/     - FAT12/16/32
     ├── ntfs/    - NTFS
     └── ext/     - ext2/3/4
@@ -132,6 +179,8 @@ type FS interface {
 }
 ```
 
+The partition table implementation creates a virtual filesystem where partitions appear as directories. When you access a path within a partition, it automatically detects and opens the appropriate filesystem (FAT, NTFS, ext) within that partition's boundaries.
+
 ## Limitations
 
 - Read-only (by design)
@@ -139,6 +188,8 @@ type FS interface {
 - No compression support (NTFS compression, squashfs, etc.)
 - No sparse file handling for output
 - Large files are loaded into memory
+- No extended/logical MBR partitions (primary partitions only)
+- No nested partition tables
 
 ## License
 
