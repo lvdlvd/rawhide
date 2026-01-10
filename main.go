@@ -2,10 +2,10 @@
 //
 // Usage:
 //
-//	fscat <image>                                  - show filesystem info
+//	fscat [-K key] [-sector size] [-tweak-offset n] <image> [command] [args...]
 //	fscat <image> ls [-l] [path]                  - list directory or file info
 //	fscat <image> cat <path>                      - copy file to stdout
-//	fscat <image> fscat <path> [cmd] [args]       - recurse into nested image
+//	fscat <image> fscat [-K key] <path> [cmd]     - recurse into nested image
 //	fscat <image> freecat                         - copy free space to stdout
 //	fscat <image> freefscat [cmd] [args]          - probe free space as image
 //	fscat <image> nbd [-rw] <path> [-socket path] - expose file as NBD block device
@@ -14,6 +14,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"io"
@@ -30,7 +31,15 @@ import (
 	"github.com/luuk/fscat/fsys/ntfs"
 	"github.com/luuk/fscat/fsys/part"
 	"github.com/luuk/fscat/nbd"
+	"github.com/luuk/fscat/xts"
 )
+
+// cryptoParams holds encryption parameters
+type cryptoParams struct {
+	key         []byte
+	sectorSize  int
+	tweakOffset uint64
+}
 
 func main() {
 	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
@@ -41,11 +50,38 @@ func main() {
 
 func run(args []string, stdout, stderr io.Writer) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: fscat <image> [command] [args...]")
+		return fmt.Errorf("usage: fscat [-K key] [-sector size] [-tweak-offset n] <image> [command] [args...]")
 	}
 
-	imagePath := args[0]
-	cmdArgs := args[1:]
+	// Parse encryption flags
+	flagSet := flag.NewFlagSet("fscat", flag.ContinueOnError)
+	keyHex := flagSet.String("K", "", "XTS-AES key in hexadecimal")
+	sectorSize := flagSet.Int("sector", 512, "Sector size for XTS encryption")
+	tweakOffset := flagSet.Uint64("tweak-offset", 0, "Starting tweak value offset")
+	if err := flagSet.Parse(args); err != nil {
+		return err
+	}
+
+	if flagSet.NArg() < 1 {
+		return fmt.Errorf("usage: fscat [-K key] [-sector size] [-tweak-offset n] <image> [command] [args...]")
+	}
+
+	imagePath := flagSet.Arg(0)
+	cmdArgs := flagSet.Args()[1:]
+
+	// Parse crypto params
+	var crypto *cryptoParams
+	if *keyHex != "" {
+		key, err := hex.DecodeString(*keyHex)
+		if err != nil {
+			return fmt.Errorf("invalid key hex: %w", err)
+		}
+		crypto = &cryptoParams{
+			key:         key,
+			sectorSize:  *sectorSize,
+			tweakOffset: *tweakOffset,
+		}
+	}
 
 	// Open image file
 	file, err := os.Open(imagePath)
@@ -59,8 +95,18 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("stat image: %w", err)
 	}
 
+	// Wrap with decryption if needed
+	var reader io.ReaderAt = file
+	size := info.Size()
+	if crypto != nil {
+		reader, err = wrapWithDecryption(reader, size, crypto)
+		if err != nil {
+			return fmt.Errorf("setting up decryption: %w", err)
+		}
+	}
+
 	// Detect filesystem type
-	fsType, err := detect.Detect(file)
+	fsType, err := detect.Detect(reader)
 	if err != nil {
 		return fmt.Errorf("detecting filesystem: %w", err)
 	}
@@ -70,13 +116,22 @@ func run(args []string, stdout, stderr io.Writer) error {
 	}
 
 	// Open filesystem
-	filesystem, err := openFilesystem(file, info.Size(), fsType)
+	filesystem, err := openFilesystem(reader, size, fsType)
 	if err != nil {
 		return fmt.Errorf("opening filesystem: %w", err)
 	}
 	defer filesystem.Close()
 
 	return runCommand(filesystem, cmdArgs, stdout, stderr)
+}
+
+// wrapWithDecryption wraps a reader with XTS decryption
+func wrapWithDecryption(r io.ReaderAt, size int64, crypto *cryptoParams) (*xts.ReaderAt, error) {
+	cipher, err := xts.New(crypto.key, crypto.sectorSize, crypto.tweakOffset)
+	if err != nil {
+		return nil, err
+	}
+	return xts.NewReaderAt(r, cipher, size), nil
 }
 
 // runCommand executes a command against a filesystem
@@ -147,16 +202,47 @@ func getReaderForPath(filesystem fsys.FS, path string) (io.ReaderAt, int64, erro
 
 // runFscat handles the fscat command for nested images
 func runFscat(filesystem fsys.FS, args []string, stdout, stderr io.Writer) error {
-	if len(args) < 1 {
+	// Parse encryption flags
+	flagSet := flag.NewFlagSet("fscat", flag.ContinueOnError)
+	keyHex := flagSet.String("K", "", "XTS-AES key in hexadecimal")
+	sectorSize := flagSet.Int("sector", 512, "Sector size for XTS encryption")
+	tweakOffset := flagSet.Uint64("tweak-offset", 0, "Starting tweak value offset")
+	if err := flagSet.Parse(args); err != nil {
+		return err
+	}
+
+	if flagSet.NArg() < 1 {
 		return fmt.Errorf("fscat requires a path argument")
 	}
 
-	innerPath := args[0]
-	remainingArgs := args[1:]
+	innerPath := flagSet.Arg(0)
+	remainingArgs := flagSet.Args()[1:]
+
+	// Parse crypto params
+	var crypto *cryptoParams
+	if *keyHex != "" {
+		key, err := hex.DecodeString(*keyHex)
+		if err != nil {
+			return fmt.Errorf("invalid key hex: %w", err)
+		}
+		crypto = &cryptoParams{
+			key:         key,
+			sectorSize:  *sectorSize,
+			tweakOffset: *tweakOffset,
+		}
+	}
 
 	reader, fileSize, err := getReaderForPath(filesystem, innerPath)
 	if err != nil {
 		return fmt.Errorf("accessing %s: %w", innerPath, err)
+	}
+
+	// Wrap with decryption if needed
+	if crypto != nil {
+		reader, err = wrapWithDecryption(reader, fileSize, crypto)
+		if err != nil {
+			return fmt.Errorf("setting up decryption for %s: %w", innerPath, err)
+		}
 	}
 
 	// Detect filesystem type
@@ -270,6 +356,9 @@ func runNbd(filesystem fsys.FS, args []string, stdout, stderr io.Writer) error {
 	socketPath := flagSet.String("socket", "/tmp/nbd.sock", "Unix socket path")
 	exportName := flagSet.String("name", "export", "Export name for NBD clients")
 	readWrite := flagSet.Bool("rw", false, "Enable read-write access")
+	keyHex := flagSet.String("K", "", "XTS-AES key in hexadecimal")
+	sectorSize := flagSet.Int("sector", 512, "Sector size for XTS encryption")
+	tweakOffset := flagSet.Uint64("tweak-offset", 0, "Starting tweak value offset")
 	if err := flagSet.Parse(args); err != nil {
 		return err
 	}
@@ -278,10 +367,32 @@ func runNbd(filesystem fsys.FS, args []string, stdout, stderr io.Writer) error {
 		return fmt.Errorf("nbd requires a path argument")
 	}
 
+	// Parse crypto params
+	var crypto *cryptoParams
+	if *keyHex != "" {
+		key, err := hex.DecodeString(*keyHex)
+		if err != nil {
+			return fmt.Errorf("invalid key hex: %w", err)
+		}
+		crypto = &cryptoParams{
+			key:         key,
+			sectorSize:  *sectorSize,
+			tweakOffset: *tweakOffset,
+		}
+	}
+
 	path := flagSet.Arg(0)
 	reader, size, err := getReaderForPath(filesystem, path)
 	if err != nil {
 		return err
+	}
+
+	// Wrap with decryption if needed
+	if crypto != nil {
+		reader, err = wrapWithDecryption(reader, size, crypto)
+		if err != nil {
+			return fmt.Errorf("setting up decryption: %w", err)
+		}
 	}
 
 	var writer io.WriterAt
@@ -347,14 +458,32 @@ func runFreeNbd(filesystem fsys.FS, args []string, stdout, stderr io.Writer) err
 
 // getWriterForReader creates a writer that uses the same extent map as the reader.
 // It requires the underlying base reader to be an *os.File so it can be re-opened for writing.
+// getWriterForReader creates a writer that uses the same extent map and encryption as the reader.
+// It unwraps XTS and extent layers to find the base file, then rebuilds the write chain.
 func getWriterForReader(reader io.ReaderAt) (io.WriterAt, error) {
-	extReader, ok := reader.(*fsys.ExtentReaderAt)
-	if !ok {
-		return nil, fmt.Errorf("reader is not an ExtentReaderAt")
+	// Unwrap layers to find base file and collect XTS cipher if present
+	var xtsCipher *xts.Cipher
+	var xtsSize int64
+	current := reader
+
+	// Check for XTS layer first
+	if xtsReader, ok := current.(*xts.ReaderAt); ok {
+		xtsCipher = xtsReader.Cipher()
+		xtsSize = xtsReader.Size()
+		current = xtsReader.BaseReader()
 	}
 
-	baseReader := extReader.BaseReader()
-	baseFile, ok := baseReader.(*os.File)
+	// Check for extent layer
+	var extents []fsys.Extent
+	var extentSize int64
+	if extReader, ok := current.(*fsys.ExtentReaderAt); ok {
+		extents = extReader.Extents()
+		extentSize = extReader.Size()
+		current = extReader.BaseReader()
+	}
+
+	// Now we should have the base file
+	baseFile, ok := current.(*os.File)
 	if !ok {
 		return nil, fmt.Errorf("base reader is not a file (nested read-write not supported through memory buffers)")
 	}
@@ -365,8 +494,24 @@ func getWriterForReader(reader io.ReaderAt) (io.WriterAt, error) {
 		return nil, fmt.Errorf("opening file for writing: %w", err)
 	}
 
-	// Create ExtentWriterAt with the same extents
-	return fsys.NewExtentWriterAt(rwFile, extReader.Extents(), extReader.Size()), nil
+	// Rebuild the write chain
+	var writer io.WriterAt = rwFile
+
+	// Add extent layer if present
+	if len(extents) > 0 {
+		writer = fsys.NewExtentWriterAt(writer, extents, extentSize)
+	}
+
+	// Add XTS layer if present
+	if xtsCipher != nil {
+		size := xtsSize
+		if size == 0 {
+			size = extentSize
+		}
+		writer = xts.NewWriterAt(writer, xtsCipher, size)
+	}
+
+	return writer, nil
 }
 
 // serveNbd starts an NBD server with the given reader and optional writer

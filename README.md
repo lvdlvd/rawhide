@@ -7,12 +7,13 @@ A command-line tool to read files from filesystem images (FAT12/16/32, NTFS, ext
 - **Multi-filesystem support**: FAT12, FAT16, FAT32, NTFS, ext2, ext3, ext4
 - **Partition table support**: MBR (DOS) and GPT partition tables
 - **Skeleton support**: APFS, HFS+ (detection and info only)
+- **XTS-AES encryption**: Read encrypted disk images (AES-128/192/256-XTS)
 - **Recursive image access**: Access filesystem images within images
 - **Free space analysis**: Extract and probe unallocated space
 - **NBD server**: Expose any file as a Linux block device
 - **Automatic detection**: Identifies filesystem types via magic bytes
 - **io/fs.FS compatible**: All filesystem implementations satisfy the standard Go `io/fs.FS` interface
-- **Read-only**: Safe operation that never modifies the source image
+- **Read-only**: Safe operation that never modifies the source image (unless -rw flag used)
 - **No root required**: Works without mounting or special privileges
 
 ## Installation
@@ -32,10 +33,31 @@ go build
 ## Usage
 
 ```
-fscat <image> [command] [args...]
+fscat [-K key] [-sector size] [-tweak-offset n] <image> [command] [args...]
 ```
 
 If no command is given, shows filesystem information.
+
+### Encryption Options
+
+fscat supports XTS-AES encryption for reading encrypted disk images:
+
+- `-K <hex>` - XTS-AES key in hexadecimal (32, 48, or 64 bytes for AES-128/192/256)
+- `-sector <size>` - Sector size for encryption (default: 512)
+- `-tweak-offset <n>` - Starting tweak/sector number offset (default: 0)
+
+These flags apply to the image immediately following them and can be used at the top level or with `fscat` subcommand for nested encrypted images.
+
+```bash
+# Read encrypted disk image
+fscat -K 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f encrypted.img ls
+
+# Encrypted partition inside unencrypted disk
+fscat disk.img fscat -K <hex-key> p0 ls
+
+# With custom sector size
+fscat -K <hex-key> -sector 4096 encrypted.img ls
+```
 
 ### Commands
 
@@ -225,6 +247,7 @@ fscat
 │   ├── ntfs/    - NTFS
 │   └── part/    - Partition tables (MBR/GPT)
 ├── nbd/         - NBD (Network Block Device) server
+├── xts/         - XTS-AES encryption/decryption
 └── main.go      - CLI
 ```
 
