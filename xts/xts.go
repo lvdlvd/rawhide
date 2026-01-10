@@ -1,5 +1,17 @@
-// Package xts implements XTS-AES (XEX-based tweaked-codebook mode with ciphertext stealing)
-// as specified in IEEE Std 1619-2007.
+// Copyright 2012 The Go Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style
+// license that can be found in the LICENSE file.
+
+// Package xts implements the XTS cipher mode as specified in IEEE P1619/D16.
+//
+// XTS mode is typically used for disk encryption. The disk is conceptually
+// an array of sectors and we must be able to encrypt and decrypt a sector
+// in isolation. XTS wraps a block cipher with Rogaway's XEX mode in order
+// to build a tweakable block cipher, allowing each sector to have a unique
+// tweak and effectively creating a unique key for each sector.
+//
+// This implementation is adapted from golang.org/x/crypto/xts with added
+// support for configurable sector sizes and ReaderAt/WriterAt wrappers.
 package xts
 
 import (
@@ -8,163 +20,335 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
 )
 
-// Cipher implements XTS-AES encryption/decryption
+// blockSize is the block size that the underlying cipher must have.
+const blockSize = 16
+
+// Cipher contains an expanded key structure.
 type Cipher struct {
-	k1, k2      cipher.Block // K1 for data encryption, K2 for tweak encryption
-	sectorSize  int          // Size of each data unit (sector)
-	tweakOffset uint64       // Starting tweak value (logical sector number offset)
+	k1, k2     cipher.Block
+	sectorSize int
 }
 
-// New creates a new XTS-AES cipher.
+// NewCipher creates a Cipher given a function for creating the underlying
+// block cipher (which must have a block size of 16 bytes). The key must be
+// twice the length of the underlying cipher's key.
+func NewCipher(cipherFunc func([]byte) (cipher.Block, error), key []byte) (*Cipher, error) {
+	c := new(Cipher)
+	var err error
+	if c.k1, err = cipherFunc(key[:len(key)/2]); err != nil {
+		return nil, err
+	}
+	if c.k2, err = cipherFunc(key[len(key)/2:]); err != nil {
+		return nil, err
+	}
+
+	if c.k1.BlockSize() != blockSize {
+		return nil, errors.New("xts: cipher does not have a block size of 16")
+	}
+
+	c.sectorSize = blockSize // Default for compatibility
+	return c, nil
+}
+
+// New creates an XTS-AES cipher with the given key and sector size.
 // Key must be 32 bytes (AES-128-XTS), 48 bytes (AES-192-XTS), or 64 bytes (AES-256-XTS).
 // The key is split in half: first half for data encryption, second half for tweak.
-func New(key []byte, sectorSize int, tweakOffset uint64) (*Cipher, error) {
-	keyLen := len(key)
-	if keyLen != 32 && keyLen != 48 && keyLen != 64 {
-		return nil, fmt.Errorf("xts: invalid key length %d (must be 32, 48, or 64 bytes)", keyLen)
+// Sector size must be a positive multiple of 16 bytes.
+func New(key []byte, sectorSize int) (*Cipher, error) {
+	if len(key) != 32 && len(key) != 48 && len(key) != 64 {
+		return nil, fmt.Errorf("xts: invalid key length %d (must be 32, 48, or 64)", len(key))
+	}
+	if sectorSize < blockSize || sectorSize%blockSize != 0 {
+		return nil, fmt.Errorf("xts: sector size must be a positive multiple of %d", blockSize)
 	}
 
-	if sectorSize < 16 {
-		return nil, errors.New("xts: sector size must be at least 16 bytes")
-	}
-
-	halfLen := keyLen / 2
-	k1, err := aes.NewCipher(key[:halfLen])
+	c, err := NewCipher(aes.NewCipher, key)
 	if err != nil {
-		return nil, fmt.Errorf("xts: creating K1 cipher: %w", err)
+		return nil, err
 	}
-
-	k2, err := aes.NewCipher(key[halfLen:])
-	if err != nil {
-		return nil, fmt.Errorf("xts: creating K2 cipher: %w", err)
-	}
-
-	return &Cipher{
-		k1:          k1,
-		k2:          k2,
-		sectorSize:  sectorSize,
-		tweakOffset: tweakOffset,
-	}, nil
+	c.sectorSize = sectorSize
+	return c, nil
 }
 
-// SectorSize returns the sector size
+// SectorSize returns the sector size.
 func (c *Cipher) SectorSize() int {
 	return c.sectorSize
 }
 
-// TweakOffset returns the tweak offset
-func (c *Cipher) TweakOffset() uint64 {
-	return c.tweakOffset
+// Encrypt encrypts a sector of plaintext and puts the result into ciphertext.
+// Plaintext and ciphertext must overlap entirely or not at all.
+// Sectors must be a multiple of 16 bytes.
+func (c *Cipher) Encrypt(ciphertext, plaintext []byte, sectorNum uint64) {
+	if len(ciphertext) < len(plaintext) {
+		panic("xts: ciphertext is smaller than plaintext")
+	}
+	if len(plaintext)%blockSize != 0 {
+		panic("xts: plaintext is not a multiple of the block size")
+	}
+
+	var tweak [blockSize]byte
+	binary.LittleEndian.PutUint64(tweak[:8], sectorNum)
+	c.k2.Encrypt(tweak[:], tweak[:])
+
+	for i := 0; i < len(plaintext); i += blockSize {
+		for j := 0; j < blockSize; j++ {
+			ciphertext[i+j] = plaintext[i+j] ^ tweak[j]
+		}
+		c.k1.Encrypt(ciphertext[i:i+blockSize], ciphertext[i:i+blockSize])
+		for j := 0; j < blockSize; j++ {
+			ciphertext[i+j] ^= tweak[j]
+		}
+		mul2(&tweak)
+	}
+}
+
+// Decrypt decrypts a sector of ciphertext and puts the result into plaintext.
+// Plaintext and ciphertext must overlap entirely or not at all.
+// Sectors must be a multiple of 16 bytes.
+func (c *Cipher) Decrypt(plaintext, ciphertext []byte, sectorNum uint64) {
+	if len(plaintext) < len(ciphertext) {
+		panic("xts: plaintext is smaller than ciphertext")
+	}
+	if len(ciphertext)%blockSize != 0 {
+		panic("xts: ciphertext is not a multiple of the block size")
+	}
+
+	var tweak [blockSize]byte
+	binary.LittleEndian.PutUint64(tweak[:8], sectorNum)
+	c.k2.Encrypt(tweak[:], tweak[:])
+
+	for i := 0; i < len(ciphertext); i += blockSize {
+		for j := 0; j < blockSize; j++ {
+			plaintext[i+j] = ciphertext[i+j] ^ tweak[j]
+		}
+		c.k1.Decrypt(plaintext[i:i+blockSize], plaintext[i:i+blockSize])
+		for j := 0; j < blockSize; j++ {
+			plaintext[i+j] ^= tweak[j]
+		}
+		mul2(&tweak)
+	}
+}
+
+// mul2 multiplies tweak by 2 in GF(2^128) with an irreducible polynomial of
+// x^128 + x^7 + x^2 + x + 1.
+func mul2(tweak *[blockSize]byte) {
+	var carryIn byte
+	for j := range tweak {
+		carryOut := tweak[j] >> 7
+		tweak[j] = (tweak[j] << 1) + carryIn
+		carryIn = carryOut
+	}
+	if carryIn != 0 {
+		// If we have a carry bit then we need to subtract a multiple
+		// of the irreducible polynomial (x^128 + x^7 + x^2 + x + 1).
+		// By dropping the carry bit, we're subtracting the x^128 term
+		// so all that remains is to subtract x^7 + x^2 + x + 1.
+		// Subtraction (and addition) in this representation is just XOR.
+		tweak[0] ^= 1<<7 | 1<<2 | 1<<1 | 1
+	}
 }
 
 // EncryptSector encrypts a single sector in place.
-// sectorNum is the logical sector number (tweak value before adding offset).
-func (c *Cipher) EncryptSector(data []byte, sectorNum uint64) error {
-	if len(data) != c.sectorSize {
-		return fmt.Errorf("xts: data length %d != sector size %d", len(data), c.sectorSize)
+func (c *Cipher) EncryptSector(sector []byte, sectorNum uint64) error {
+	if len(sector) != c.sectorSize {
+		return fmt.Errorf("xts: sector length %d != sector size %d", len(sector), c.sectorSize)
 	}
-	return c.process(data, sectorNum+c.tweakOffset, false)
+	c.Encrypt(sector, sector, sectorNum)
+	return nil
 }
 
 // DecryptSector decrypts a single sector in place.
-// sectorNum is the logical sector number (tweak value before adding offset).
-func (c *Cipher) DecryptSector(data []byte, sectorNum uint64) error {
-	if len(data) != c.sectorSize {
-		return fmt.Errorf("xts: data length %d != sector size %d", len(data), c.sectorSize)
+func (c *Cipher) DecryptSector(sector []byte, sectorNum uint64) error {
+	if len(sector) != c.sectorSize {
+		return fmt.Errorf("xts: sector length %d != sector size %d", len(sector), c.sectorSize)
 	}
-	return c.process(data, sectorNum+c.tweakOffset, true)
-}
-
-// process performs XTS encryption or decryption
-func (c *Cipher) process(data []byte, tweak uint64, decrypt bool) error {
-	// Encrypt the tweak
-	var tweakBuf [16]byte
-	binary.LittleEndian.PutUint64(tweakBuf[:8], tweak)
-	// Upper 64 bits are zero (standard XTS uses 128-bit tweak, lower bits are sector number)
-
-	var T [16]byte
-	c.k2.Encrypt(T[:], tweakBuf[:])
-
-	// Process each 16-byte block
-	numBlocks := len(data) / 16
-	for i := 0; i < numBlocks; i++ {
-		block := data[i*16 : (i+1)*16]
-
-		// XOR with T
-		xorBlock(block, T[:])
-
-		// Encrypt or decrypt
-		if decrypt {
-			c.k1.Decrypt(block, block)
-		} else {
-			c.k1.Encrypt(block, block)
-		}
-
-		// XOR with T again
-		xorBlock(block, T[:])
-
-		// Multiply T by x in GF(2^128)
-		gfMul(T[:])
-	}
-
+	c.Decrypt(sector, sector, sectorNum)
 	return nil
 }
 
-// xorBlock XORs b with x in place
-func xorBlock(b, x []byte) {
-	for i := 0; i < 16; i++ {
-		b[i] ^= x[i]
-	}
-}
-
-// gfMul multiplies the value in b by x in GF(2^128) with polynomial x^128 + x^7 + x^2 + x + 1
-func gfMul(b []byte) {
-	var carry byte
-	for i := 0; i < 16; i++ {
-		newCarry := b[i] >> 7
-		b[i] = (b[i] << 1) | carry
-		carry = newCarry
-	}
-	// If there was a carry out, XOR with the reduction polynomial (0x87)
-	if carry != 0 {
-		b[0] ^= 0x87
-	}
-}
-
-// Encrypt encrypts multiple sectors.
-// data length must be a multiple of sector size.
-// startSector is the logical sector number of the first sector.
-func (c *Cipher) Encrypt(data []byte, startSector uint64) error {
+// EncryptSectors encrypts multiple sectors in place.
+func (c *Cipher) EncryptSectors(data []byte, startSector uint64) error {
 	if len(data)%c.sectorSize != 0 {
 		return fmt.Errorf("xts: data length %d not a multiple of sector size %d", len(data), c.sectorSize)
 	}
-
-	numSectors := len(data) / c.sectorSize
-	for i := 0; i < numSectors; i++ {
-		sector := data[i*c.sectorSize : (i+1)*c.sectorSize]
-		if err := c.EncryptSector(sector, startSector+uint64(i)); err != nil {
-			return err
-		}
+	for i := 0; i < len(data); i += c.sectorSize {
+		c.Encrypt(data[i:i+c.sectorSize], data[i:i+c.sectorSize], startSector)
+		startSector++
 	}
 	return nil
 }
 
-// Decrypt decrypts multiple sectors.
-// data length must be a multiple of sector size.
-// startSector is the logical sector number of the first sector.
-func (c *Cipher) Decrypt(data []byte, startSector uint64) error {
+// DecryptSectors decrypts multiple sectors in place.
+func (c *Cipher) DecryptSectors(data []byte, startSector uint64) error {
 	if len(data)%c.sectorSize != 0 {
 		return fmt.Errorf("xts: data length %d not a multiple of sector size %d", len(data), c.sectorSize)
 	}
-
-	numSectors := len(data) / c.sectorSize
-	for i := 0; i < numSectors; i++ {
-		sector := data[i*c.sectorSize : (i+1)*c.sectorSize]
-		if err := c.DecryptSector(sector, startSector+uint64(i)); err != nil {
-			return err
-		}
+	for i := 0; i < len(data); i += c.sectorSize {
+		c.Decrypt(data[i:i+c.sectorSize], data[i:i+c.sectorSize], startSector)
+		startSector++
 	}
 	return nil
+}
+
+// ReaderAt wraps an io.ReaderAt and decrypts data on read using XTS-AES.
+type ReaderAt struct {
+	r      io.ReaderAt
+	cipher *Cipher
+	size   int64
+}
+
+// NewReaderAt creates a new decrypting ReaderAt.
+func NewReaderAt(r io.ReaderAt, cipher *Cipher, size int64) *ReaderAt {
+	return &ReaderAt{
+		r:      r,
+		cipher: cipher,
+		size:   size,
+	}
+}
+
+// ReadAt implements io.ReaderAt with decryption.
+func (x *ReaderAt) ReadAt(p []byte, off int64) (n int, err error) {
+	if off < 0 {
+		return 0, fmt.Errorf("xts: negative offset")
+	}
+	if off >= x.size {
+		return 0, io.EOF
+	}
+
+	sectorSize := int64(x.cipher.SectorSize())
+
+	// Calculate sector-aligned read boundaries
+	startSector := off / sectorSize
+	endOffset := off + int64(len(p))
+	if endOffset > x.size {
+		endOffset = x.size
+	}
+	endSector := (endOffset + sectorSize - 1) / sectorSize
+
+	// Read sector-aligned data
+	alignedStart := startSector * sectorSize
+	alignedLen := (endSector - startSector) * sectorSize
+	alignedBuf := make([]byte, alignedLen)
+
+	readN, err := x.r.ReadAt(alignedBuf, alignedStart)
+	if err != nil && err != io.EOF {
+		return 0, err
+	}
+
+	// Round down to complete sectors for decryption
+	completeSectors := readN / int(sectorSize)
+	if completeSectors == 0 {
+		if readN > 0 {
+			return 0, fmt.Errorf("xts: partial sector read (%d bytes)", readN)
+		}
+		return 0, io.EOF
+	}
+
+	decryptLen := completeSectors * int(sectorSize)
+	if err := x.cipher.DecryptSectors(alignedBuf[:decryptLen], uint64(startSector)); err != nil {
+		return 0, fmt.Errorf("xts: decryption failed: %w", err)
+	}
+
+	// Copy the requested portion to output
+	offsetInBuf := int(off - alignedStart)
+	available := decryptLen - offsetInBuf
+	toCopy := len(p)
+	if toCopy > available {
+		toCopy = available
+	}
+	copy(p[:toCopy], alignedBuf[offsetInBuf:offsetInBuf+toCopy])
+
+	if off+int64(toCopy) >= x.size {
+		return toCopy, io.EOF
+	}
+	return toCopy, nil
+}
+
+// BaseReader returns the underlying reader.
+func (x *ReaderAt) BaseReader() io.ReaderAt {
+	return x.r
+}
+
+// Cipher returns the XTS cipher (for creating a matching writer).
+func (x *ReaderAt) Cipher() *Cipher {
+	return x.cipher
+}
+
+// Size returns the logical size.
+func (x *ReaderAt) Size() int64 {
+	return x.size
+}
+
+// WriterAt wraps an io.WriterAt and encrypts data on write using XTS-AES.
+type WriterAt struct {
+	w      io.WriterAt
+	cipher *Cipher
+	size   int64
+}
+
+// NewWriterAt creates a new encrypting WriterAt.
+func NewWriterAt(w io.WriterAt, cipher *Cipher, size int64) *WriterAt {
+	return &WriterAt{
+		w:      w,
+		cipher: cipher,
+		size:   size,
+	}
+}
+
+// WriteAt implements io.WriterAt with encryption.
+// Writes must be sector-aligned and sector-sized.
+func (x *WriterAt) WriteAt(p []byte, off int64) (n int, err error) {
+	if off < 0 {
+		return 0, fmt.Errorf("xts: negative offset")
+	}
+	if off >= x.size {
+		return 0, io.ErrShortWrite
+	}
+
+	sectorSize := int64(x.cipher.SectorSize())
+
+	// Check alignment
+	if off%sectorSize != 0 {
+		return 0, fmt.Errorf("xts: write offset %d not sector-aligned (sector size %d)", off, sectorSize)
+	}
+	if int64(len(p))%sectorSize != 0 {
+		return 0, fmt.Errorf("xts: write length %d not a multiple of sector size %d", len(p), sectorSize)
+	}
+
+	// Limit to size
+	writeLen := int64(len(p))
+	if off+writeLen > x.size {
+		writeLen = x.size - off
+	}
+
+	// Make a copy for encryption (don't modify caller's buffer)
+	encrypted := make([]byte, writeLen)
+	copy(encrypted, p[:writeLen])
+
+	// Encrypt
+	startSector := uint64(off / sectorSize)
+	if err := x.cipher.EncryptSectors(encrypted, startSector); err != nil {
+		return 0, fmt.Errorf("xts: encryption failed: %w", err)
+	}
+
+	// Write encrypted data
+	return x.w.WriteAt(encrypted, off)
+}
+
+// BaseWriter returns the underlying writer.
+func (x *WriterAt) BaseWriter() io.WriterAt {
+	return x.w
+}
+
+// Cipher returns the XTS cipher.
+func (x *WriterAt) Cipher() *Cipher {
+	return x.cipher
+}
+
+// Size returns the logical size.
+func (x *WriterAt) Size() int64 {
+	return x.size
 }

@@ -2,7 +2,7 @@
 //
 // Usage:
 //
-//	fscat [-K key] [-sector size] [-tweak-offset n] <image> [command] [args...]
+//	fscat [-K key] [-sector size] <image> [command] [args...]
 //	fscat <image> ls [-l] [path]                  - list directory or file info
 //	fscat <image> cat <path>                      - copy file to stdout
 //	fscat <image> fscat [-K key] <path> [cmd]     - recurse into nested image
@@ -36,9 +36,8 @@ import (
 
 // cryptoParams holds encryption parameters
 type cryptoParams struct {
-	key         []byte
-	sectorSize  int
-	tweakOffset uint64
+	key        []byte
+	sectorSize int
 }
 
 func main() {
@@ -57,13 +56,12 @@ func run(args []string, stdout, stderr io.Writer) error {
 	flagSet := flag.NewFlagSet("fscat", flag.ContinueOnError)
 	keyHex := flagSet.String("K", "", "XTS-AES key in hexadecimal")
 	sectorSize := flagSet.Int("sector", 512, "Sector size for XTS encryption")
-	tweakOffset := flagSet.Uint64("tweak-offset", 0, "Starting tweak value offset")
 	if err := flagSet.Parse(args); err != nil {
 		return err
 	}
 
 	if flagSet.NArg() < 1 {
-		return fmt.Errorf("usage: fscat [-K key] [-sector size] [-tweak-offset n] <image> [command] [args...]")
+		return fmt.Errorf("usage: fscat [-K key] [-sector size] <image> [command] [args...]")
 	}
 
 	imagePath := flagSet.Arg(0)
@@ -77,9 +75,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 			return fmt.Errorf("invalid key hex: %w", err)
 		}
 		crypto = &cryptoParams{
-			key:         key,
-			sectorSize:  *sectorSize,
-			tweakOffset: *tweakOffset,
+			key:        key,
+			sectorSize: *sectorSize,
 		}
 	}
 
@@ -127,7 +124,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 
 // wrapWithDecryption wraps a reader with XTS decryption
 func wrapWithDecryption(r io.ReaderAt, size int64, crypto *cryptoParams) (*xts.ReaderAt, error) {
-	cipher, err := xts.New(crypto.key, crypto.sectorSize, crypto.tweakOffset)
+	cipher, err := xts.New(crypto.key, crypto.sectorSize)
 	if err != nil {
 		return nil, err
 	}
@@ -206,7 +203,6 @@ func runFscat(filesystem fsys.FS, args []string, stdout, stderr io.Writer) error
 	flagSet := flag.NewFlagSet("fscat", flag.ContinueOnError)
 	keyHex := flagSet.String("K", "", "XTS-AES key in hexadecimal")
 	sectorSize := flagSet.Int("sector", 512, "Sector size for XTS encryption")
-	tweakOffset := flagSet.Uint64("tweak-offset", 0, "Starting tweak value offset")
 	if err := flagSet.Parse(args); err != nil {
 		return err
 	}
@@ -226,9 +222,8 @@ func runFscat(filesystem fsys.FS, args []string, stdout, stderr io.Writer) error
 			return fmt.Errorf("invalid key hex: %w", err)
 		}
 		crypto = &cryptoParams{
-			key:         key,
-			sectorSize:  *sectorSize,
-			tweakOffset: *tweakOffset,
+			key:        key,
+			sectorSize: *sectorSize,
 		}
 	}
 
@@ -358,7 +353,6 @@ func runNbd(filesystem fsys.FS, args []string, stdout, stderr io.Writer) error {
 	readWrite := flagSet.Bool("rw", false, "Enable read-write access")
 	keyHex := flagSet.String("K", "", "XTS-AES key in hexadecimal")
 	sectorSize := flagSet.Int("sector", 512, "Sector size for XTS encryption")
-	tweakOffset := flagSet.Uint64("tweak-offset", 0, "Starting tweak value offset")
 	if err := flagSet.Parse(args); err != nil {
 		return err
 	}
@@ -375,9 +369,8 @@ func runNbd(filesystem fsys.FS, args []string, stdout, stderr io.Writer) error {
 			return fmt.Errorf("invalid key hex: %w", err)
 		}
 		crypto = &cryptoParams{
-			key:         key,
-			sectorSize:  *sectorSize,
-			tweakOffset: *tweakOffset,
+			key:        key,
+			sectorSize: *sectorSize,
 		}
 	}
 

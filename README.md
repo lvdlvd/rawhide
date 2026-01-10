@@ -33,7 +33,7 @@ go build
 ## Usage
 
 ```
-fscat [-K key] [-sector size] [-tweak-offset n] <image> [command] [args...]
+fscat [-K key] [-sector size] <image> [command] [args...]
 ```
 
 If no command is given, shows filesystem information.
@@ -44,7 +44,6 @@ fscat supports XTS-AES encryption for reading encrypted disk images:
 
 - `-K <hex>` - XTS-AES key in hexadecimal (32, 48, or 64 bytes for AES-128/192/256)
 - `-sector <size>` - Sector size for encryption (default: 512)
-- `-tweak-offset <n>` - Starting tweak/sector number offset (default: 0)
 
 These flags apply to the image immediately following them and can be used at the top level or with `fscat` subcommand for nested encrypted images.
 
