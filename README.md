@@ -9,6 +9,7 @@ A command-line tool to read files from filesystem images (FAT12/16/32, NTFS, ext
 - **Skeleton support**: APFS, HFS+ (detection and info only)
 - **Recursive image access**: Access filesystem images within images
 - **Free space analysis**: Extract and probe unallocated space
+- **NBD server**: Expose any file as a Linux block device
 - **Automatic detection**: Identifies filesystem types via magic bytes
 - **io/fs.FS compatible**: All filesystem implementations satisfy the standard Go `io/fs.FS` interface
 - **Read-only**: Safe operation that never modifies the source image
@@ -115,6 +116,36 @@ fscat disk.img freefscat ls
 
 Useful for forensics when a filesystem has been deleted but data remains.
 
+#### `nbd` - Expose file as NBD block device
+
+Exposes any accessible file as a Linux Network Block Device:
+
+```bash
+# Expose a partition as a block device
+fscat disk.img nbd p0
+
+# With custom socket path and export name
+fscat disk.img nbd -socket /tmp/my.sock -name myexport p0
+
+# Then connect from another terminal:
+sudo nbd-client -N myexport -unix /tmp/my.sock /dev/nbd0
+sudo mount /dev/nbd0 /mnt
+```
+
+This allows you to mount nested images or partitions without extracting them first.
+
+#### `freenbd` - Expose free space as NBD block device
+
+Exposes concatenated free space as a block device:
+
+```bash
+fscat disk.img freenbd -socket /tmp/free.sock
+
+# Connect and scan for deleted data
+sudo nbd-client -N freespace -unix /tmp/free.sock /dev/nbd0
+sudo photorec /dev/nbd0
+```
+
 ## Examples
 
 ### Working with partitioned disks
@@ -186,6 +217,7 @@ fscat
 │   ├── hfsplus/ - Apple HFS+ (skeleton)
 │   ├── ntfs/    - NTFS
 │   └── part/    - Partition tables (MBR/GPT)
+├── nbd/         - NBD (Network Block Device) server
 └── main.go      - CLI
 ```
 

@@ -8,6 +8,8 @@
 //	fscat <image> fscat <path> [cmd] [args]   - recurse into nested image
 //	fscat <image> freecat                     - copy free space to stdout
 //	fscat <image> freefscat [cmd] [args]      - probe free space as image
+//	fscat <image> nbd <path> [-socket path]   - expose file as NBD block device
+//	fscat <image> freenbd [-socket path]      - expose free space as NBD device
 package main
 
 import (
@@ -16,6 +18,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/signal"
+	"syscall"
 
 	"github.com/luuk/fscat/detect"
 	"github.com/luuk/fscat/fsys"
@@ -25,6 +29,7 @@ import (
 	"github.com/luuk/fscat/fsys/hfsplus"
 	"github.com/luuk/fscat/fsys/ntfs"
 	"github.com/luuk/fscat/fsys/part"
+	"github.com/luuk/fscat/nbd"
 )
 
 func main() {
@@ -95,8 +100,12 @@ func runCommand(filesystem fsys.FS, args []string, stdout, stderr io.Writer) err
 		return runFreeCat(filesystem, stdout)
 	case "freefscat":
 		return runFreeFscat(filesystem, cmdArgs, stdout, stderr)
+	case "nbd":
+		return runNbd(filesystem, cmdArgs, stdout, stderr)
+	case "freenbd":
+		return runFreeNbd(filesystem, cmdArgs, stdout, stderr)
 	default:
-		return fmt.Errorf("unknown command: %s (use ls, cat, fscat, freecat, freefscat)", command)
+		return fmt.Errorf("unknown command: %s (use ls, cat, fscat, freecat, freefscat, nbd, freenbd)", command)
 	}
 }
 
@@ -253,6 +262,99 @@ func runFreeFscat(filesystem fsys.FS, args []string, stdout, stderr io.Writer) e
 	defer innerFS.Close()
 
 	return runCommand(innerFS, args, stdout, stderr)
+}
+
+// runNbd exposes a file as an NBD block device
+func runNbd(filesystem fsys.FS, args []string, stdout, stderr io.Writer) error {
+	flagSet := flag.NewFlagSet("nbd", flag.ContinueOnError)
+	socketPath := flagSet.String("socket", "/tmp/nbd.sock", "Unix socket path")
+	exportName := flagSet.String("name", "export", "Export name for NBD clients")
+	if err := flagSet.Parse(args); err != nil {
+		return err
+	}
+
+	if flagSet.NArg() < 1 {
+		return fmt.Errorf("nbd requires a path argument")
+	}
+
+	path := flagSet.Arg(0)
+	reader, size, err := getReaderForPath(filesystem, path)
+	if err != nil {
+		return err
+	}
+
+	return serveNbd(*socketPath, *exportName, reader, size, stdout, stderr)
+}
+
+// runFreeNbd exposes free space as an NBD block device
+func runFreeNbd(filesystem fsys.FS, args []string, stdout, stderr io.Writer) error {
+	flagSet := flag.NewFlagSet("freenbd", flag.ContinueOnError)
+	socketPath := flagSet.String("socket", "/tmp/nbd.sock", "Unix socket path")
+	exportName := flagSet.String("name", "freespace", "Export name for NBD clients")
+	if err := flagSet.Parse(args); err != nil {
+		return err
+	}
+
+	fb, ok := filesystem.(fsys.FreeBlocker)
+	if !ok {
+		return fmt.Errorf("filesystem type %s does not support free block listing", filesystem.Type())
+	}
+
+	ranges, err := fb.FreeBlocks()
+	if err != nil {
+		return fmt.Errorf("getting free blocks: %w", err)
+	}
+
+	br, ok := filesystem.(interface{ BaseReader() io.ReaderAt })
+	if !ok {
+		return fmt.Errorf("filesystem does not expose base reader")
+	}
+
+	// Convert ranges to extents
+	extents := make([]fsys.Extent, len(ranges))
+	var totalSize int64
+	for i, r := range ranges {
+		extents[i] = fsys.Extent{
+			Logical:  totalSize,
+			Physical: r.Start,
+			Length:   r.Size(),
+		}
+		totalSize += r.Size()
+	}
+
+	reader := fsys.NewExtentReaderAt(br.BaseReader(), extents, totalSize)
+	return serveNbd(*socketPath, *exportName, reader, totalSize, stdout, stderr)
+}
+
+// serveNbd starts an NBD server with the given reader
+func serveNbd(socketPath, exportName string, reader io.ReaderAt, size int64, stdout, stderr io.Writer) error {
+	server := nbd.NewServer(socketPath)
+
+	exp := &nbd.Export{
+		Name:   exportName,
+		Reader: reader,
+		Size:   size,
+	}
+
+	if err := server.AddExport(exp); err != nil {
+		return err
+	}
+
+	// Handle shutdown signals
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	go func() {
+		<-sigChan
+		fmt.Fprintln(stderr, "\nShutting down...")
+		server.Close()
+	}()
+
+	fmt.Fprintf(stdout, "NBD server starting on unix:%s\n", socketPath)
+	fmt.Fprintf(stdout, "Export: %s (%d bytes, read-only)\n", exportName, size)
+	fmt.Fprintf(stdout, "Connect with: sudo nbd-client -N %s -unix %s /dev/nbdX\n", exportName, socketPath)
+	fmt.Fprintf(stdout, "Press Ctrl+C to stop\n")
+
+	return server.Serve()
 }
 
 func openFilesystem(r io.ReaderAt, size int64, fsType detect.Type) (fsys.FS, error) {
