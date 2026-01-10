@@ -1,13 +1,13 @@
-// fscat - Read files from filesystem images (FAT, NTFS, ext2/3/4)
+// fscat - Read files from filesystem images (FAT, NTFS, ext2/3/4, APFS, HFS+)
 //
 // Usage:
 //
-//	fscat <image> ls [-l] [path]
-//	fscat <image> cat <path>
-//	fscat <image> stat <path>
-//	fscat <image> info
-//	fscat <image> free
-//	fscat <image> fscat <path/to/inner.img> <command> [args...]
+//	fscat <image>                              - show filesystem info
+//	fscat <image> ls [-l] [path]              - list directory or file info
+//	fscat <image> cat <path>                  - copy file to stdout
+//	fscat <image> fscat <path> [cmd] [args]   - recurse into nested image
+//	fscat <image> freecat                     - copy free space to stdout
+//	fscat <image> freefscat [cmd] [args]      - probe free space as image
 package main
 
 import (
@@ -17,7 +17,6 @@ import (
 	"io"
 	"os"
 
-	"github.com/luuk/fscat/cmd"
 	"github.com/luuk/fscat/detect"
 	"github.com/luuk/fscat/fsys"
 	"github.com/luuk/fscat/fsys/apfs"
@@ -36,8 +35,8 @@ func main() {
 }
 
 func run(args []string, stdout, stderr io.Writer) error {
-	if len(args) < 2 {
-		return fmt.Errorf("usage: fscat <image> <command> [options] [path]")
+	if len(args) < 1 {
+		return fmt.Errorf("usage: fscat <image> [command] [args...]")
 	}
 
 	imagePath := args[0]
@@ -75,10 +74,11 @@ func run(args []string, stdout, stderr io.Writer) error {
 	return runCommand(filesystem, cmdArgs, stdout, stderr)
 }
 
-// runCommand executes a command against a filesystem, supporting recursive fscat
+// runCommand executes a command against a filesystem
 func runCommand(filesystem fsys.FS, args []string, stdout, stderr io.Writer) error {
-	if len(args) < 1 {
-		return fmt.Errorf("missing command")
+	// Default command is info
+	if len(args) == 0 {
+		return runInfo(filesystem, stdout)
 	}
 
 	command := args[0]
@@ -89,67 +89,65 @@ func runCommand(filesystem fsys.FS, args []string, stdout, stderr io.Writer) err
 		return runLs(filesystem, cmdArgs, stdout)
 	case "cat":
 		return runCat(filesystem, cmdArgs, stdout)
-	case "stat":
-		return runStat(filesystem, cmdArgs, stdout)
-	case "info":
-		return runInfo(filesystem, stdout)
-	case "free":
-		return runFree(filesystem, stdout)
 	case "fscat":
-		return runNestedFscat(filesystem, cmdArgs, stdout, stderr)
+		return runFscat(filesystem, cmdArgs, stdout, stderr)
+	case "freecat":
+		return runFreeCat(filesystem, stdout)
+	case "freefscat":
+		return runFreeFscat(filesystem, cmdArgs, stdout, stderr)
 	default:
-		return fmt.Errorf("unknown command: %s (use ls, cat, stat, info, free, or fscat)", command)
+		return fmt.Errorf("unknown command: %s (use ls, cat, fscat, freecat, freefscat)", command)
 	}
 }
 
-// runNestedFscat handles the fscat subcommand for nested images
-func runNestedFscat(filesystem fsys.FS, args []string, stdout, stderr io.Writer) error {
-	if len(args) < 2 {
-		return fmt.Errorf("usage: fscat <path/to/inner.img> <command> [args...]")
+// getReaderForPath returns a ReaderAt and size for a file path using extent mapping
+func getReaderForPath(filesystem fsys.FS, path string) (io.ReaderAt, int64, error) {
+	info, err := filesystem.Stat(path)
+	if err != nil {
+		return nil, 0, err
+	}
+	if info.IsDir() {
+		return nil, 0, fmt.Errorf("%s is a directory", path)
+	}
+
+	fileSize := info.Size()
+
+	// Try extent-based access first
+	if em, ok := filesystem.(fsys.ExtentMapper); ok {
+		if br, ok := filesystem.(interface{ BaseReader() io.ReaderAt }); ok {
+			extents, err := em.FileExtents(path)
+			if err == nil && len(extents) > 0 {
+				return fsys.NewExtentReaderAt(br.BaseReader(), extents, fileSize), fileSize, nil
+			}
+		}
+	}
+
+	// Fall back to reading into memory
+	file, err := filesystem.Open(path)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer file.Close()
+
+	data, err := io.ReadAll(file.(io.Reader))
+	if err != nil {
+		return nil, 0, err
+	}
+	return bytes.NewReader(data), int64(len(data)), nil
+}
+
+// runFscat handles the fscat command for nested images
+func runFscat(filesystem fsys.FS, args []string, stdout, stderr io.Writer) error {
+	if len(args) < 1 {
+		return fmt.Errorf("fscat requires a path argument")
 	}
 
 	innerPath := args[0]
 	remainingArgs := args[1:]
 
-	// Get file info to check it's not a directory and get size
-	info, err := filesystem.Stat(innerPath)
+	reader, fileSize, err := getReaderForPath(filesystem, innerPath)
 	if err != nil {
-		return fmt.Errorf("stat inner image %s: %w", innerPath, err)
-	}
-	if info.IsDir() {
-		return fmt.Errorf("%s is a directory, not an image file", innerPath)
-	}
-
-	fileSize := info.Size()
-
-	// Try to get extents for zero-copy access
-	var reader io.ReaderAt
-
-	if em, ok := filesystem.(fsys.ExtentMapper); ok {
-		extents, err := em.FileExtents(innerPath)
-		if err == nil && len(extents) > 0 {
-			// Get the underlying ReaderAt from the filesystem
-			// We need to access the base reader - check if filesystem exposes it
-			if baseReader := getBaseReader(filesystem); baseReader != nil {
-				reader = fsys.NewExtentReaderAt(baseReader, extents, fileSize)
-			}
-		}
-	}
-
-	// Fall back to reading into memory if extent mapping didn't work
-	if reader == nil {
-		file, err := filesystem.Open(innerPath)
-		if err != nil {
-			return fmt.Errorf("opening inner image %s: %w", innerPath, err)
-		}
-		defer file.Close()
-
-		data, err := io.ReadAll(file.(io.Reader))
-		if err != nil {
-			return fmt.Errorf("reading inner image %s: %w", innerPath, err)
-		}
-		reader = bytes.NewReader(data)
-		fileSize = int64(len(data))
+		return fmt.Errorf("accessing %s: %w", innerPath, err)
 	}
 
 	// Detect filesystem type
@@ -169,21 +167,92 @@ func runNestedFscat(filesystem fsys.FS, args []string, stdout, stderr io.Writer)
 	}
 	defer innerFS.Close()
 
-	// Recursively execute the command
+	// Recursively execute the command (default = info)
 	return runCommand(innerFS, remainingArgs, stdout, stderr)
 }
 
-// ReaderAtExposer is an optional interface for filesystems that can expose their base reader
-type ReaderAtExposer interface {
-	BaseReader() io.ReaderAt
+// runFreeCat copies free space to stdout
+func runFreeCat(filesystem fsys.FS, out io.Writer) error {
+	fb, ok := filesystem.(fsys.FreeBlocker)
+	if !ok {
+		return fmt.Errorf("filesystem type %s does not support free block listing", filesystem.Type())
+	}
+
+	ranges, err := fb.FreeBlocks()
+	if err != nil {
+		return fmt.Errorf("getting free blocks: %w", err)
+	}
+
+	br, ok := filesystem.(interface{ BaseReader() io.ReaderAt })
+	if !ok {
+		return fmt.Errorf("filesystem does not expose base reader")
+	}
+
+	// Convert ranges to extents
+	extents := make([]fsys.Extent, len(ranges))
+	var totalSize int64
+	for i, r := range ranges {
+		extents[i] = fsys.Extent{
+			Logical:  totalSize,
+			Physical: r.Start,
+			Length:   r.Size(),
+		}
+		totalSize += r.Size()
+	}
+
+	reader := fsys.NewExtentReaderAt(br.BaseReader(), extents, totalSize)
+	return streamToWriter(reader, totalSize, out)
 }
 
-// getBaseReader attempts to get the underlying ReaderAt from a filesystem
-func getBaseReader(filesystem fsys.FS) io.ReaderAt {
-	if exp, ok := filesystem.(ReaderAtExposer); ok {
-		return exp.BaseReader()
+// runFreeFscat probes free space as a filesystem image
+func runFreeFscat(filesystem fsys.FS, args []string, stdout, stderr io.Writer) error {
+	fb, ok := filesystem.(fsys.FreeBlocker)
+	if !ok {
+		return fmt.Errorf("filesystem type %s does not support free block listing", filesystem.Type())
 	}
-	return nil
+
+	ranges, err := fb.FreeBlocks()
+	if err != nil {
+		return fmt.Errorf("getting free blocks: %w", err)
+	}
+
+	br, ok := filesystem.(interface{ BaseReader() io.ReaderAt })
+	if !ok {
+		return fmt.Errorf("filesystem does not expose base reader")
+	}
+
+	// Convert ranges to extents
+	extents := make([]fsys.Extent, len(ranges))
+	var totalSize int64
+	for i, r := range ranges {
+		extents[i] = fsys.Extent{
+			Logical:  totalSize,
+			Physical: r.Start,
+			Length:   r.Size(),
+		}
+		totalSize += r.Size()
+	}
+
+	reader := fsys.NewExtentReaderAt(br.BaseReader(), extents, totalSize)
+
+	// Detect filesystem type
+	fsType, err := detect.Detect(reader)
+	if err != nil {
+		return fmt.Errorf("detecting filesystem in free space: %w", err)
+	}
+
+	if fsType == detect.Unknown {
+		return fmt.Errorf("no recognizable filesystem in free space")
+	}
+
+	// Open the filesystem
+	innerFS, err := openFilesystem(reader, totalSize, fsType)
+	if err != nil {
+		return fmt.Errorf("opening filesystem in free space: %w", err)
+	}
+	defer innerFS.Close()
+
+	return runCommand(innerFS, args, stdout, stderr)
 }
 
 func openFilesystem(r io.ReaderAt, size int64, fsType detect.Type) (fsys.FS, error) {
@@ -218,10 +287,60 @@ func runLs(filesystem fsys.FS, args []string, out io.Writer) error {
 		path = flagSet.Arg(0)
 	}
 
-	return cmd.Ls(filesystem, path, out, cmd.LsOptions{
-		Long: *long,
-		All:  *all,
-	})
+	// Check if path is a file or directory
+	info, err := filesystem.Stat(path)
+	if err != nil {
+		return err
+	}
+
+	if !info.IsDir() {
+		// It's a file - just show its info
+		if *long {
+			fmt.Fprintf(out, "%s %12d %s %s\n",
+				info.Mode(), info.Size(), info.ModTime().Format("Jan _2 15:04"), info.Name())
+		} else {
+			fmt.Fprintln(out, info.Name())
+		}
+		return nil
+	}
+
+	// It's a directory - list contents
+	entries, err := filesystem.ReadDir(path)
+	if err != nil {
+		return err
+	}
+
+	for _, entry := range entries {
+		// Skip system files unless -a
+		if !*all && isSystemFile(entry.Name()) {
+			continue
+		}
+
+		if *long {
+			einfo, err := entry.Info()
+			if err != nil {
+				continue
+			}
+			fmt.Fprintf(out, "%s %12d %s %s\n",
+				einfo.Mode(), einfo.Size(), einfo.ModTime().Format("Jan _2 15:04"), entry.Name())
+		} else {
+			name := entry.Name()
+			if entry.IsDir() {
+				name += "/"
+			}
+			fmt.Fprintln(out, name)
+		}
+	}
+
+	return nil
+}
+
+func isSystemFile(name string) bool {
+	// NTFS system files
+	if len(name) > 0 && name[0] == '$' {
+		return true
+	}
+	return false
 }
 
 func runCat(filesystem fsys.FS, args []string, out io.Writer) error {
@@ -229,76 +348,54 @@ func runCat(filesystem fsys.FS, args []string, out io.Writer) error {
 		return fmt.Errorf("cat requires a path argument")
 	}
 
-	return cmd.Cat(filesystem, args[0], out)
-}
-
-func runStat(filesystem fsys.FS, args []string, out io.Writer) error {
-	if len(args) < 1 {
-		return fmt.Errorf("stat requires a path argument")
+	path := args[0]
+	reader, size, err := getReaderForPath(filesystem, path)
+	if err != nil {
+		return err
 	}
 
-	return cmd.Stat(filesystem, args[0], out)
+	return streamToWriter(reader, size, out)
+}
+
+// streamToWriter copies from ReaderAt to Writer
+func streamToWriter(r io.ReaderAt, size int64, out io.Writer) error {
+	const bufSize = 64 * 1024
+	buf := make([]byte, bufSize)
+	offset := int64(0)
+
+	for offset < size {
+		toRead := int64(bufSize)
+		if offset+toRead > size {
+			toRead = size - offset
+		}
+
+		n, err := r.ReadAt(buf[:toRead], offset)
+		if n > 0 {
+			if _, werr := out.Write(buf[:n]); werr != nil {
+				return werr
+			}
+			offset += int64(n)
+		}
+		if err != nil {
+			if err == io.EOF {
+				break
+			}
+			return err
+		}
+	}
+	return nil
 }
 
 func runInfo(filesystem fsys.FS, out io.Writer) error {
-	fmt.Fprintf(out, "Filesystem type: %s\n", filesystem.Type())
+	fmt.Fprintf(out, "Filesystem: %s\n", filesystem.Type())
 
 	// Check if filesystem has detailed info
 	type infoProvider interface {
 		Info() string
 	}
 	if ip, ok := filesystem.(infoProvider); ok {
-		fmt.Fprintf(out, "\n%s\n", ip.Info())
-		return nil
-	}
-
-	// Show partition information if this is a partition table
-	if pfs, ok := filesystem.(*part.FS); ok {
-		partitions := pfs.Partitions()
-		fmt.Fprintf(out, "\nPartitions: %d\n", len(partitions))
-		fmt.Fprintf(out, "\n%-6s %-12s %12s %12s %-20s %s\n",
-			"NAME", "TYPE", "START", "SIZE", "FSTYPE", "LABEL")
-
-		for _, p := range partitions {
-			typeStr := part.PartitionTypeString(p)
-			detectedType, _ := pfs.DetectPartitionFS(p)
-			label := p.Label
-			if label == "" && p.Bootable {
-				label = "(bootable)"
-			}
-			fmt.Fprintf(out, "%-6s %-12s %12d %12s %-20s %s\n",
-				p.Name,
-				typeStr,
-				p.StartLBA,
-				formatSize(p.SizeBytes()),
-				detectedType,
-				label)
-		}
-	}
-
-	return nil
-}
-
-func runFree(filesystem fsys.FS, out io.Writer) error {
-	fb, ok := filesystem.(fsys.FreeBlocker)
-	if !ok {
-		return fmt.Errorf("filesystem type %s does not support free block listing", filesystem.Type())
-	}
-
-	ranges, err := fb.FreeBlocks()
-	if err != nil {
-		return fmt.Errorf("getting free blocks: %w", err)
-	}
-
-	// Calculate total free space
-	var totalFree int64
-	for _, r := range ranges {
-		totalFree += r.Size()
-	}
-
-	fmt.Fprintf(out, "Free ranges (%d ranges, %s total):\n", len(ranges), formatSize(totalFree))
-	for _, r := range ranges {
-		fmt.Fprintf(out, "[%d, %d) %s\n", r.Start, r.End, formatSize(r.Size()))
+		fmt.Fprintln(out)
+		fmt.Fprintln(out, ip.Info())
 	}
 
 	return nil
