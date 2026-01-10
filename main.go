@@ -6,6 +6,7 @@
 //	fscat <image> cat <path>
 //	fscat <image> stat <path>
 //	fscat <image> info
+//	fscat <image> free
 package main
 
 import (
@@ -78,8 +79,10 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return runStat(filesystem, cmdArgs, stdout)
 	case "info":
 		return runInfo(filesystem, fsType, stdout)
+	case "free":
+		return runFree(filesystem, stdout)
 	default:
-		return fmt.Errorf("unknown command: %s (use ls, cat, stat, or info)", command)
+		return fmt.Errorf("unknown command: %s (use ls, cat, stat, info, or free)", command)
 	}
 }
 
@@ -159,6 +162,31 @@ func runInfo(filesystem fsys.FS, fsType detect.Type, out io.Writer) error {
 				fsType,
 				label)
 		}
+	}
+
+	return nil
+}
+
+func runFree(filesystem fsys.FS, out io.Writer) error {
+	fb, ok := filesystem.(fsys.FreeBlocker)
+	if !ok {
+		return fmt.Errorf("filesystem type %s does not support free block listing", filesystem.Type())
+	}
+
+	ranges, err := fb.FreeBlocks()
+	if err != nil {
+		return fmt.Errorf("getting free blocks: %w", err)
+	}
+
+	// Calculate total free space
+	var totalFree int64
+	for _, r := range ranges {
+		totalFree += r.Size()
+	}
+
+	fmt.Fprintf(out, "Free ranges (%d ranges, %s total):\n", len(ranges), formatSize(totalFree))
+	for _, r := range ranges {
+		fmt.Fprintf(out, "[%d, %d) %s\n", r.Start, r.End, formatSize(r.Size()))
 	}
 
 	return nil

@@ -121,6 +121,79 @@ func (f *FS) parseBootSector(header []byte) error {
 func (f *FS) Type() string { return "NTFS" }
 func (f *FS) Close() error { return nil }
 
+// FreeBlocks returns the list of free byte ranges in the NTFS filesystem.
+// Free clusters are identified by 0 bits in the $Bitmap file.
+func (f *FS) FreeBlocks() ([]fsys.Range, error) {
+	// Load MFT if needed
+	if err := f.loadMFT(); err != nil {
+		return nil, fmt.Errorf("loading MFT: %w", err)
+	}
+
+	// Read the $Bitmap file (MFT record 6)
+	bitmapRecord, err := f.readMFTRecord(mftRecordBitmap)
+	if err != nil {
+		return nil, fmt.Errorf("reading $Bitmap record: %w", err)
+	}
+
+	attrs, err := f.parseAttributes(bitmapRecord)
+	if err != nil {
+		return nil, fmt.Errorf("parsing $Bitmap attributes: %w", err)
+	}
+
+	// Find and read the $DATA attribute
+	var bitmapData []byte
+	for _, attr := range attrs {
+		if attr.attrType == attrData && attr.name == "" {
+			bitmapData, err = f.readAttributeData(&attr)
+			if err != nil {
+				return nil, fmt.Errorf("reading $Bitmap data: %w", err)
+			}
+			break
+		}
+	}
+
+	if bitmapData == nil {
+		return nil, fmt.Errorf("$Bitmap $DATA attribute not found")
+	}
+
+	// Calculate total clusters
+	totalClusters := f.size / int64(f.clusterSize)
+	clusterSize := int64(f.clusterSize)
+
+	var ranges []fsys.Range
+	var inFreeRange bool
+	var rangeStart int64
+
+	// Scan bitmap for free clusters
+	for cluster := int64(0); cluster < totalClusters; cluster++ {
+		byteIndex := cluster / 8
+		bitIndex := cluster % 8
+
+		if byteIndex >= int64(len(bitmapData)) {
+			break
+		}
+
+		// In NTFS, bit=0 means free, bit=1 means allocated
+		isFree := (bitmapData[byteIndex] & (1 << bitIndex)) == 0
+		offset := cluster * clusterSize
+
+		if isFree && !inFreeRange {
+			rangeStart = offset
+			inFreeRange = true
+		} else if !isFree && inFreeRange {
+			ranges = append(ranges, fsys.Range{Start: rangeStart, End: offset})
+			inFreeRange = false
+		}
+	}
+
+	// Close final range if still in one
+	if inFreeRange {
+		ranges = append(ranges, fsys.Range{Start: rangeStart, End: totalClusters * clusterSize})
+	}
+
+	return ranges, nil
+}
+
 func (f *FS) clusterOffset(cluster uint64) int64 {
 	return int64(cluster) * int64(f.clusterSize)
 }

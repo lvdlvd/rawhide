@@ -88,6 +88,28 @@ p0     EFI System           2048        16.0M FAT32                EFI System
 p1     Basic Data          34816        31.0M ext4                 Data Partition
 ```
 
+#### `free` - List free space ranges
+
+```bash
+fscat disk.img free
+```
+
+Output shows byte ranges as `[start, end)` where start is inclusive and end is exclusive:
+
+```
+Free ranges (4 ranges, 29.5M total):
+[12288, 16384) 4.0K
+[94208, 4206592) 3.9M
+[4624384, 16773120) 11.6M
+[18874368, 33550336) 14.0M
+```
+
+This is useful for:
+- Finding unallocated space in filesystem images
+- Data recovery and forensics
+- Understanding filesystem fragmentation
+- Partition table gap analysis
+
 ## Working with Partitioned Disks
 
 Partition tables (MBR and GPT) are treated as an outer quasi-filesystem where partitions appear as directories:
@@ -133,23 +155,27 @@ fscat unknown.img info
 ### Partition Tables
 - **MBR (DOS)**: Up to 4 primary partitions, partition type detection
 - **GPT**: Full GUID partition support, partition labels, up to 128 entries
+- **Free space**: Gaps between partitions and unpartitioned areas
 
 ### FAT (FAT12, FAT16, FAT32)
 - Full directory traversal
 - Long filename (LFN) support
 - Correct timestamp parsing
+- Free space from FAT cluster entries
 
 ### NTFS
 - MFT parsing
 - Index allocation (B-tree directories)
 - Data runs and non-resident attributes
 - Large file support
+- Free space from $Bitmap file
 
 ### ext2/3/4
 - Inode-based access
 - Extent trees (ext4)
 - Indirect blocks
 - Directory entries with file types
+- Free space from block group bitmaps
 
 ## Architecture
 

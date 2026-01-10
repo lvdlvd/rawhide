@@ -177,6 +177,98 @@ func (f *FS) parseSuperblock(data []byte) error {
 func (f *FS) Type() string { return f.typ }
 func (f *FS) Close() error { return nil }
 
+// FreeBlocks returns the list of free byte ranges in the ext filesystem.
+// Free blocks are identified by 0 bits in the block bitmaps.
+func (f *FS) FreeBlocks() ([]fsys.Range, error) {
+	var ranges []fsys.Range
+	blockSize := int64(f.blockSize)
+
+	// Iterate through all block groups
+	for group := uint32(0); group < f.sb.groupCount; group++ {
+		bgd, err := f.readBlockGroupDescriptor(group)
+		if err != nil {
+			return nil, fmt.Errorf("reading block group descriptor %d: %w", group, err)
+		}
+
+		// Read the block bitmap for this group
+		bitmap, err := f.readBlock(bgd.blockBitmap)
+		if err != nil {
+			return nil, fmt.Errorf("reading block bitmap for group %d: %w", group, err)
+		}
+
+		// Calculate the first block number in this group
+		firstBlock := uint64(f.sb.firstDataBlock) + uint64(group)*uint64(f.sb.blocksPerGroup)
+
+		// Number of blocks in this group (last group may have fewer)
+		blocksInGroup := uint64(f.sb.blocksPerGroup)
+		remainingBlocks := f.sb.blocksCount - firstBlock
+		if blocksInGroup > remainingBlocks {
+			blocksInGroup = remainingBlocks
+		}
+
+		// Scan bitmap for free blocks
+		var inFreeRange bool
+		var rangeStart int64
+
+		for i := uint64(0); i < blocksInGroup; i++ {
+			byteIndex := i / 8
+			bitIndex := i % 8
+
+			if int(byteIndex) >= len(bitmap) {
+				break
+			}
+
+			// In ext2/3/4, bit=0 means free, bit=1 means allocated
+			isFree := (bitmap[byteIndex] & (1 << bitIndex)) == 0
+			blockNum := firstBlock + i
+			offset := int64(blockNum) * blockSize
+
+			if isFree && !inFreeRange {
+				rangeStart = offset
+				inFreeRange = true
+			} else if !isFree && inFreeRange {
+				ranges = append(ranges, fsys.Range{Start: rangeStart, End: offset})
+				inFreeRange = false
+			}
+		}
+
+		// Close range at end of group if still in one
+		if inFreeRange {
+			endBlock := firstBlock + blocksInGroup
+			ranges = append(ranges, fsys.Range{Start: rangeStart, End: int64(endBlock) * blockSize})
+			inFreeRange = false
+		}
+	}
+
+	// Merge adjacent ranges from different groups
+	ranges = mergeRanges(ranges)
+
+	return ranges, nil
+}
+
+// mergeRanges combines adjacent ranges
+func mergeRanges(ranges []fsys.Range) []fsys.Range {
+	if len(ranges) <= 1 {
+		return ranges
+	}
+
+	merged := make([]fsys.Range, 0, len(ranges))
+	current := ranges[0]
+
+	for i := 1; i < len(ranges); i++ {
+		if ranges[i].Start == current.End {
+			// Adjacent, extend current range
+			current.End = ranges[i].End
+		} else {
+			merged = append(merged, current)
+			current = ranges[i]
+		}
+	}
+	merged = append(merged, current)
+
+	return merged
+}
+
 func (f *FS) blockOffset(block uint64) int64 {
 	return int64(block) * int64(f.blockSize)
 }

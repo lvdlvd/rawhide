@@ -225,6 +225,70 @@ func (pfs *FS) Close() error {
 	return nil
 }
 
+// FreeBlocks returns the list of free byte ranges in the disk image.
+// For partition tables, free space is any area not covered by a partition.
+// This includes gaps between partitions and space before/after all partitions.
+func (pfs *FS) FreeBlocks() ([]fsys.Range, error) {
+	// Sort partitions by start offset (they should already be sorted, but ensure it)
+	type partRange struct {
+		start int64
+		end   int64
+	}
+	var usedRanges []partRange
+
+	for _, p := range pfs.partitions {
+		usedRanges = append(usedRanges, partRange{
+			start: p.StartOffset(),
+			end:   p.StartOffset() + p.SizeBytes(),
+		})
+	}
+
+	// Sort by start
+	for i := 0; i < len(usedRanges); i++ {
+		for j := i + 1; j < len(usedRanges); j++ {
+			if usedRanges[j].start < usedRanges[i].start {
+				usedRanges[i], usedRanges[j] = usedRanges[j], usedRanges[i]
+			}
+		}
+	}
+
+	var freeRanges []fsys.Range
+
+	// For MBR, the boot sector (0-512) and typically the first track are reserved
+	// For GPT, LBA 0-33 are reserved (protective MBR + GPT header + entries)
+	var reservedEnd int64
+	if pfs.tableType == detect.MBR {
+		reservedEnd = 512 // Just the MBR itself
+	} else {
+		reservedEnd = 34 * 512 // GPT protective MBR + header + 32 partition entries
+	}
+
+	// Find gaps
+	currentPos := reservedEnd
+	for _, r := range usedRanges {
+		if r.start > currentPos {
+			freeRanges = append(freeRanges, fsys.Range{Start: currentPos, End: r.start})
+		}
+		if r.end > currentPos {
+			currentPos = r.end
+		}
+	}
+
+	// Space after last partition
+	if currentPos < pfs.size {
+		// For GPT, reserve backup partition table at end (33 sectors)
+		endLimit := pfs.size
+		if pfs.tableType == detect.GPT {
+			endLimit = pfs.size - 33*512
+		}
+		if currentPos < endLimit {
+			freeRanges = append(freeRanges, fsys.Range{Start: currentPos, End: endLimit})
+		}
+	}
+
+	return freeRanges, nil
+}
+
 // Partitions returns the list of partitions
 func (pfs *FS) Partitions() []*Partition {
 	return pfs.partitions

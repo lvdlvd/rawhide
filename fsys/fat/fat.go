@@ -122,6 +122,48 @@ func (f *FS) parseBPB(header []byte) error {
 func (f *FS) Type() string { return f.typ }
 func (f *FS) Close() error { return nil }
 
+// FreeBlocks returns the list of free byte ranges in the FAT filesystem.
+// Free clusters are those with a FAT entry value of 0.
+func (f *FS) FreeBlocks() ([]fsys.Range, error) {
+	var ranges []fsys.Range
+	clusterSize := int64(f.clusterSize())
+
+	var inFreeRange bool
+	var rangeStart int64
+
+	// Iterate through all data clusters (starting at cluster 2)
+	for cluster := uint32(2); cluster < f.bpb.countOfClusters+2; cluster++ {
+		entry, err := f.fat.next(cluster)
+		if err != nil {
+			return nil, fmt.Errorf("reading FAT entry %d: %w", cluster, err)
+		}
+
+		// Check if cluster is free (entry == 0)
+		isFree := (entry == 0)
+
+		offset := f.clusterToOffset(cluster)
+
+		if isFree && !inFreeRange {
+			// Start new free range
+			rangeStart = offset
+			inFreeRange = true
+		} else if !isFree && inFreeRange {
+			// End current free range
+			ranges = append(ranges, fsys.Range{Start: rangeStart, End: offset})
+			inFreeRange = false
+		}
+	}
+
+	// Close final range if still in one
+	if inFreeRange {
+		lastCluster := f.bpb.countOfClusters + 2 - 1
+		endOffset := f.clusterToOffset(lastCluster) + clusterSize
+		ranges = append(ranges, fsys.Range{Start: rangeStart, End: endOffset})
+	}
+
+	return ranges, nil
+}
+
 // clusterToOffset converts a cluster number to a byte offset
 func (f *FS) clusterToOffset(cluster uint32) int64 {
 	return int64(f.bpb.firstDataSector)*int64(f.bpb.bytesPerSector) +
