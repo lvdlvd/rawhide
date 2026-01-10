@@ -22,6 +22,8 @@ const (
 	Ext4
 	MBR // Master Boot Record partition table
 	GPT // GUID Partition Table
+	APFS
+	HFSPlus
 )
 
 func (t Type) String() string {
@@ -44,6 +46,10 @@ func (t Type) String() string {
 		return "MBR"
 	case GPT:
 		return "GPT"
+	case APFS:
+		return "APFS"
+	case HFSPlus:
+		return "HFS+"
 	default:
 		return "unknown"
 	}
@@ -64,6 +70,11 @@ func (t Type) IsPartitionTable() bool {
 	return t == MBR || t == GPT
 }
 
+// IsApple returns true if the type is an Apple filesystem
+func (t Type) IsApple() bool {
+	return t == APFS || t == HFSPlus
+}
+
 // Detect identifies the filesystem type from a reader.
 // It reads the necessary header bytes to identify the filesystem.
 func Detect(r io.ReaderAt) (Type, error) {
@@ -82,7 +93,21 @@ func Detect(r io.ReaderAt) (Type, error) {
 		return GPT, nil
 	}
 
-	// Check NTFS first (offset 3: "NTFS    ")
+	// Check for APFS container superblock - "NXSB" at offset 32
+	if n >= 36 && binary.LittleEndian.Uint32(header[32:36]) == 0x4253584E {
+		return APFS, nil
+	}
+
+	// Check for HFS+ volume header at offset 1024
+	// Signature is 'H+' (0x482B) or 'HX' (0x4858) in big-endian
+	if n >= 1026 {
+		sig := binary.BigEndian.Uint16(header[1024:1026])
+		if sig == 0x482B || sig == 0x4858 {
+			return HFSPlus, nil
+		}
+	}
+
+	// Check NTFS (offset 3: "NTFS    ")
 	if n >= 11 && bytes.Equal(header[3:11], []byte("NTFS    ")) {
 		return NTFS, nil
 	}

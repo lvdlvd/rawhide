@@ -20,8 +20,10 @@ import (
 	"github.com/luuk/fscat/cmd"
 	"github.com/luuk/fscat/detect"
 	"github.com/luuk/fscat/fsys"
+	"github.com/luuk/fscat/fsys/apfs"
 	"github.com/luuk/fscat/fsys/ext"
 	"github.com/luuk/fscat/fsys/fat"
+	"github.com/luuk/fscat/fsys/hfsplus"
 	"github.com/luuk/fscat/fsys/ntfs"
 	"github.com/luuk/fscat/fsys/part"
 )
@@ -194,6 +196,10 @@ func openFilesystem(r io.ReaderAt, size int64, fsType detect.Type) (fsys.FS, err
 		return ext.Open(r, size)
 	case fsType == detect.NTFS:
 		return ntfs.Open(r, size)
+	case fsType == detect.APFS:
+		return apfs.Open(r, size)
+	case fsType == detect.HFSPlus:
+		return hfsplus.Open(r, size)
 	default:
 		return nil, fmt.Errorf("unsupported filesystem type: %s", fsType)
 	}
@@ -236,6 +242,15 @@ func runStat(filesystem fsys.FS, args []string, out io.Writer) error {
 
 func runInfo(filesystem fsys.FS, out io.Writer) error {
 	fmt.Fprintf(out, "Filesystem type: %s\n", filesystem.Type())
+
+	// Check if filesystem has detailed info
+	type infoProvider interface {
+		Info() string
+	}
+	if ip, ok := filesystem.(infoProvider); ok {
+		fmt.Fprintf(out, "\n%s\n", ip.Info())
+		return nil
+	}
 
 	// Show partition information if this is a partition table
 	if pfs, ok := filesystem.(*part.FS); ok {

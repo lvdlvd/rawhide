@@ -742,6 +742,23 @@ func PartitionTypeString(p *Partition) string {
 		return "Linux LVM"
 	case "A19D880F-05FC-4D3B-A006-743F0F84911E":
 		return "Linux RAID"
+	// Apple partition types
+	case "7C3457EF-0000-11AA-AA11-00306543ECAC":
+		return "Apple APFS"
+	case "48465300-0000-11AA-AA11-00306543ECAC":
+		return "Apple HFS+"
+	case "55465300-0000-11AA-AA11-00306543ECAC":
+		return "Apple UFS"
+	case "52414944-0000-11AA-AA11-00306543ECAC":
+		return "Apple RAID"
+	case "426F6F74-0000-11AA-AA11-00306543ECAC":
+		return "Apple Boot"
+	case "4C616265-6C00-11AA-AA11-00306543ECAC":
+		return "Apple Label"
+	case "5265636F-7665-11AA-AA11-00306543ECAC":
+		return "Apple Recovery"
+	case "53746F72-6167-11AA-AA11-00306543ECAC":
+		return "Apple Core Storage"
 	default:
 		return guidStr
 	}
