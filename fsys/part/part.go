@@ -12,8 +12,8 @@ import (
 	"time"
 	"unicode/utf16"
 
-	"github.com/luuk/fscat/detect"
-	"github.com/luuk/fscat/fsys"
+	"github.com/lvdlvd/rawhide/detect"
+	"github.com/lvdlvd/rawhide/fsys"
 )
 
 // Partition represents a single partition entry

@@ -10,7 +10,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/luuk/fscat/fsys"
+	"github.com/lvdlvd/rawhide/fsys"
 )
 
 const (

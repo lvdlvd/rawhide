@@ -1,15 +1,15 @@
-// fscat - Read files from filesystem images (FAT, NTFS, ext2/3/4, APFS, HFS+)
+// rawhide - Read files from filesystem images (FAT, NTFS, ext2/3/4, APFS, HFS+)
 //
 // Usage:
 //
-//	fscat [-K key] [-sector size] <image> [command] [args...]
-//	fscat <image> ls [-l] [path]                  - list directory or file info
-//	fscat <image> cat <path>                      - copy file to stdout
-//	fscat <image> fscat [-K key] <path> [cmd]     - recurse into nested image
-//	fscat <image> freecat                         - copy free space to stdout
-//	fscat <image> freefscat [cmd] [args]          - probe free space as image
-//	fscat <image> nbd [-rw] <path> [-socket path] - expose file as NBD block device
-//	fscat <image> freenbd [-rw] [-socket path]    - expose free space as NBD device
+//	rawhide [-K key] [-sector size] <image> [command] [args...]
+//	rawhide <image> ls [-l] [path]                  - list directory or file info
+//	rawhide <image> cat <path>                      - copy file to stdout
+//	rawhide <image> fscat [-K key] <path> [cmd]     - recurse into nested image
+//	rawhide <image> freecat                         - copy free space to stdout
+//	rawhide <image> freefscat [cmd] [args]          - probe free space as image
+//	rawhide <image> nbd [-rw] <path> [-socket path] - expose file as NBD block device
+//	rawhide <image> freenbd [-rw] [-socket path]    - expose free space as NBD device
 package main
 
 import (
@@ -22,16 +22,16 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/luuk/fscat/detect"
-	"github.com/luuk/fscat/fsys"
-	"github.com/luuk/fscat/fsys/apfs"
-	"github.com/luuk/fscat/fsys/ext"
-	"github.com/luuk/fscat/fsys/fat"
-	"github.com/luuk/fscat/fsys/hfsplus"
-	"github.com/luuk/fscat/fsys/ntfs"
-	"github.com/luuk/fscat/fsys/part"
-	"github.com/luuk/fscat/nbd"
-	"github.com/luuk/fscat/xts"
+	"github.com/lvdlvd/rawhide/detect"
+	"github.com/lvdlvd/rawhide/fsys"
+	"github.com/lvdlvd/rawhide/fsys/apfs"
+	"github.com/lvdlvd/rawhide/fsys/ext"
+	"github.com/lvdlvd/rawhide/fsys/fat"
+	"github.com/lvdlvd/rawhide/fsys/hfsplus"
+	"github.com/lvdlvd/rawhide/fsys/ntfs"
+	"github.com/lvdlvd/rawhide/fsys/part"
+	"github.com/lvdlvd/rawhide/nbd"
+	"github.com/lvdlvd/rawhide/xts"
 )
 
 // cryptoParams holds encryption parameters
@@ -49,11 +49,11 @@ func main() {
 
 func run(args []string, stdout, stderr io.Writer) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: fscat [-K key] [-sector size] [-tweak-offset n] <image> [command] [args...]")
+		return fmt.Errorf("usage: rawhide [-K key] [-sector size] <image> [command] [args...]")
 	}
 
 	// Parse encryption flags
-	flagSet := flag.NewFlagSet("fscat", flag.ContinueOnError)
+	flagSet := flag.NewFlagSet("rawhide", flag.ContinueOnError)
 	keyHex := flagSet.String("K", "", "XTS-AES key in hexadecimal")
 	sectorSize := flagSet.Int("sector", 512, "Sector size for XTS encryption")
 	if err := flagSet.Parse(args); err != nil {
@@ -61,7 +61,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 	}
 
 	if flagSet.NArg() < 1 {
-		return fmt.Errorf("usage: fscat [-K key] [-sector size] <image> [command] [args...]")
+		return fmt.Errorf("usage: rawhide [-K key] [-sector size] <image> [command] [args...]")
 	}
 
 	imagePath := flagSet.Arg(0)

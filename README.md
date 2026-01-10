@@ -1,4 +1,4 @@
-# fscat
+# rawhide
 
 A command-line tool to read files from filesystem images (FAT12/16/32, NTFS, ext2/3/4) without mounting. Also supports MBR and GPT partition tables, with recursive access to nested images.
 
@@ -19,28 +19,28 @@ A command-line tool to read files from filesystem images (FAT12/16/32, NTFS, ext
 ## Installation
 
 ```bash
-go install github.com/luuk/fscat@latest
+go install github.com/lvdlvd/rawhide@latest
 ```
 
 Or build from source:
 
 ```bash
-git clone https://github.com/luuk/fscat
-cd fscat
+git clone https://github.com/lvdlvd/rawhide
+cd rawhide
 go build
 ```
 
 ## Usage
 
 ```
-fscat [-K key] [-sector size] <image> [command] [args...]
+rawhide [-K key] [-sector size] <image> [command] [args...]
 ```
 
 If no command is given, shows filesystem information.
 
 ### Encryption Options
 
-fscat supports XTS-AES encryption for reading encrypted disk images:
+rawhide supports XTS-AES encryption for reading encrypted disk images:
 
 - `-K <hex>` - XTS-AES key in hexadecimal (32, 48, or 64 bytes for AES-128/192/256)
 - `-sector <size>` - Sector size for encryption (default: 512)
@@ -49,13 +49,13 @@ These flags apply to the image immediately following them and can be used at the
 
 ```bash
 # Read encrypted disk image
-fscat -K 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f encrypted.img ls
+rawhide -K 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f encrypted.img ls
 
 # Encrypted partition inside unencrypted disk
-fscat disk.img fscat -K <hex-key> p0 ls
+rawhide disk.img fscat -K <hex-key> p0 ls
 
 # With custom sector size
-fscat -K <hex-key> -sector 4096 encrypted.img ls
+rawhide -K <hex-key> -sector 4096 encrypted.img ls
 ```
 
 ### Commands
@@ -63,7 +63,7 @@ fscat -K <hex-key> -sector 4096 encrypted.img ls
 #### Default (no command) - Show filesystem info
 
 ```bash
-fscat disk.img
+rawhide disk.img
 ```
 
 Output:
@@ -81,42 +81,42 @@ p1     Apple APFS                409640         1.8T
 
 ```bash
 # List root directory
-fscat disk.img ls
+rawhide disk.img ls
 
 # List with long format (permissions, size, date)
-fscat disk.img ls -l
+rawhide disk.img ls -l
 
 # List a subdirectory
-fscat disk.img ls path/to/directory
+rawhide disk.img ls path/to/directory
 
 # Show file info
-fscat disk.img ls -l somefile.txt
+rawhide disk.img ls -l somefile.txt
 ```
 
 #### `cat` - Output file contents
 
 ```bash
 # Print file to stdout
-fscat disk.img cat path/to/file.txt
+rawhide disk.img cat path/to/file.txt
 
 # Extract to a file
-fscat disk.img cat path/to/file.txt > extracted.txt
+rawhide disk.img cat path/to/file.txt > extracted.txt
 
 # Dump raw partition bytes
-fscat disk.img cat p0 > partition.bin
+rawhide disk.img cat p0 > partition.bin
 ```
 
 #### `fscat` - Recurse into nested image
 
 ```bash
 # Access filesystem inside a partition
-fscat disk.img fscat p0 ls
+rawhide disk.img fscat p0 ls
 
 # Access image file inside a filesystem
-fscat disk.img fscat p0 fscat backup.img ls
+rawhide disk.img fscat p0 fscat backup.img ls
 
 # Deep nesting
-fscat outer.img fscat p0 fscat inner.img cat readme.txt
+rawhide outer.img fscat p0 fscat inner.img cat readme.txt
 ```
 
 #### `freecat` - Output free space
@@ -124,7 +124,7 @@ fscat outer.img fscat p0 fscat inner.img cat readme.txt
 Concatenates all free/unallocated space and outputs to stdout:
 
 ```bash
-fscat disk.img freecat > freespace.bin
+rawhide disk.img freecat > freespace.bin
 ```
 
 #### `freefscat` - Probe free space for filesystem
@@ -132,7 +132,7 @@ fscat disk.img freecat > freespace.bin
 Treats free space as a virtual image and attempts to detect/access a filesystem:
 
 ```bash
-fscat disk.img freefscat ls
+rawhide disk.img freefscat ls
 ```
 
 Useful for forensics when a filesystem has been deleted but data remains.
@@ -143,13 +143,13 @@ Exposes any accessible file as a Linux Network Block Device:
 
 ```bash
 # Expose a partition as a read-only block device
-fscat disk.img nbd p0
+rawhide disk.img nbd p0
 
 # Enable read-write access
-fscat disk.img nbd -rw p0
+rawhide disk.img nbd -rw p0
 
 # With custom socket path and export name
-fscat disk.img nbd -socket /tmp/my.sock -name myexport p0
+rawhide disk.img nbd -socket /tmp/my.sock -name myexport p0
 
 # Then connect from another terminal:
 sudo nbd-client -N myexport -unix /tmp/my.sock /dev/nbd0
@@ -164,10 +164,10 @@ Exposes concatenated free space as a block device:
 
 ```bash
 # Read-only (default)
-fscat disk.img freenbd -socket /tmp/free.sock
+rawhide disk.img freenbd -socket /tmp/free.sock
 
 # Read-write (allows writing to free space for forensic recovery)
-fscat disk.img freenbd -rw -socket /tmp/free.sock
+rawhide disk.img freenbd -rw -socket /tmp/free.sock
 
 # Connect and scan for deleted data
 sudo nbd-client -N freespace -unix /tmp/free.sock /dev/nbd0
@@ -180,42 +180,42 @@ sudo photorec /dev/nbd0
 
 ```bash
 # List partitions
-fscat disk.img ls
+rawhide disk.img ls
 # Output:
 # p0
 # p1
 
 # Get partition info
-fscat disk.img ls -l
+rawhide disk.img ls -l
 # Output:
 # -r--r--r--     16777216 Jan  1 00:00 p0
 # -r--r--r--     32505856 Jan  1 00:00 p1
 
 # Access filesystem in partition 0
-fscat disk.img fscat p0 ls
+rawhide disk.img fscat p0 ls
 
 # Extract file from partition 1
-fscat disk.img fscat p1 cat documents/report.pdf > report.pdf
+rawhide disk.img fscat p1 cat documents/report.pdf > report.pdf
 ```
 
 ### Nested images
 
 ```bash
 # Backup image stored on external drive
-fscat /dev/sdb fscat p0 fscat backups/old-system.img ls
+rawhide /dev/sdb fscat p0 fscat backups/old-system.img ls
 
 # VM disk image inside a filesystem
-fscat nas-share.img fscat p0 fscat vms/windows.vhd ls
+rawhide nas-share.img fscat p0 fscat vms/windows.vhd ls
 ```
 
 ### Forensics
 
 ```bash
 # Extract deleted filesystem from free space
-fscat evidence.img freefscat ls
+rawhide evidence.img freefscat ls
 
 # Dump free space for analysis
-fscat evidence.img freecat | strings > strings.txt
+rawhide evidence.img freecat | strings > strings.txt
 ```
 
 ## Supported Formats
@@ -236,7 +236,7 @@ fscat evidence.img freecat | strings > strings.txt
 ## Architecture
 
 ```
-fscat
+rawhide
 ├── detect/      - Filesystem type detection
 ├── fsys/        - Filesystem interface and implementations
 │   ├── apfs/    - Apple APFS (skeleton)

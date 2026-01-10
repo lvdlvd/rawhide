@@ -12,7 +12,7 @@ import (
 	"time"
 	"unicode/utf16"
 
-	"github.com/luuk/fscat/fsys"
+	"github.com/lvdlvd/rawhide/fsys"
 )
 
 const (
