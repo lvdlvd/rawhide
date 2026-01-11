@@ -1,6 +1,6 @@
 // Copyright 2012 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
+// license that can be found in the LICENSE file in golang.org/x/crypto/xts.
 
 // Package xts implements the XTS cipher mode as specified in IEEE P1619/D16.
 //
