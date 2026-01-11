@@ -34,7 +34,7 @@ go build
 ## Usage
 
 ```
-rawhide [-K key] [-sector size] <image> [command] [args...]
+rawhide [-K key] [-sz size] <image> [command] [args...]
 ```
 
 If no command is given, shows filesystem information.
@@ -44,7 +44,7 @@ If no command is given, shows filesystem information.
 rawhide supports XTS-AES encryption for reading encrypted disk images:
 
 - `-K <hex>` - XTS-AES key in hexadecimal (32, 48, or 64 bytes for AES-128/192/256)
-- `-sector <size>` - Sector size for encryption (default: 512)
+- `-sz <size>` - Sector size for encryption (default: 512)
 
 These flags apply to the image immediately following them and can be used at the top level or with `fscat` subcommand for nested encrypted images.
 
@@ -56,7 +56,7 @@ rawhide -K 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f encr
 rawhide disk.img fscat -K <hex-key> p0 ls
 
 # With custom sector size
-rawhide -K <hex-key> -sector 4096 encrypted.img ls
+rawhide -K <hex-key> -sz 4096 encrypted.img ls
 ```
 
 ### Commands
@@ -107,33 +107,42 @@ rawhide disk.img cat path/to/file.txt > extracted.txt
 rawhide disk.img cat p0 > partition.bin
 ```
 
-#### `fscat` - Recurse into nested image
+#### `fscat` (alias: `fs`) - Recurse into nested image
 
 ```bash
 # Access filesystem inside a partition
 rawhide disk.img fscat p0 ls
 
+# Using the short alias
+rawhide disk.img fs p0 ls
+
 # Access image file inside a filesystem
 rawhide disk.img fscat p0 fscat backup.img ls
 
-# Deep nesting
-rawhide outer.img fscat p0 fscat inner.img cat readme.txt
+# Deep nesting with mixed aliases
+rawhide outer.img fs p0 fscat inner.img cat readme.txt
 ```
 
-#### `freecat` - Output free space
+#### `freecat` (alias: `fc`) - Output free space
 
 Concatenates all free/unallocated space and outputs to stdout:
 
 ```bash
 rawhide disk.img freecat > freespace.bin
+
+# Using the short alias
+rawhide disk.img fc > freespace.bin
 ```
 
-#### `freefscat` - Probe free space for filesystem
+#### `freefscat` (alias: `ffs`) - Probe free space for filesystem
 
 Treats free space as a virtual image and attempts to detect/access a filesystem:
 
 ```bash
 rawhide disk.img freefscat ls
+
+# Using the short alias
+rawhide disk.img ffs ls
 ```
 
 Useful for forensics when a filesystem has been deleted but data remains.
@@ -159,13 +168,16 @@ sudo mount /dev/nbd0 /mnt
 
 This allows you to mount nested images or partitions without extracting them first.
 
-#### `freenbd` - Expose free space as NBD block device
+#### `freenbd` (alias: `fnbd`) - Expose free space as NBD block device
 
 Exposes concatenated free space as a block device:
 
 ```bash
 # Read-only (default)
 rawhide disk.img freenbd -socket /tmp/free.sock
+
+# Using the short alias
+rawhide disk.img fnbd -socket /tmp/free.sock
 
 # Read-write (allows writing to free space for forensic recovery)
 rawhide disk.img freenbd -rw -socket /tmp/free.sock
@@ -195,8 +207,8 @@ rawhide disk.img ls -l
 # Access filesystem in partition 0
 rawhide disk.img fscat p0 ls
 
-# Extract file from partition 1
-rawhide disk.img fscat p1 cat documents/report.pdf > report.pdf
+# Extract file from partition 1 (using short alias)
+rawhide disk.img fs p1 cat documents/report.pdf > report.pdf
 ```
 
 ### Nested images
@@ -212,11 +224,11 @@ rawhide nas-share.img fscat p0 fscat vms/windows.vhd ls
 ### Forensics
 
 ```bash
-# Extract deleted filesystem from free space
-rawhide evidence.img freefscat ls
+# Extract deleted filesystem from free space (using short alias)
+rawhide evidence.img ffs ls
 
-# Dump free space for analysis
-rawhide evidence.img freecat | strings > strings.txt
+# Dump free space for analysis (using short alias)
+rawhide evidence.img fc | strings > strings.txt
 ```
 
 ## Supported Formats

@@ -2,14 +2,14 @@
 //
 // Usage:
 //
-//	rawhide [-K key] [-sector size] <image> [command] [args...]
-//	rawhide <image> ls [-l] [path]                  - list directory or file info
-//	rawhide <image> cat <path>                      - copy file to stdout
-//	rawhide <image> fscat [-K key] <path> [cmd]     - recurse into nested image
-//	rawhide <image> freecat                         - copy free space to stdout
-//	rawhide <image> freefscat [cmd] [args]          - probe free space as image
-//	rawhide <image> nbd [-rw] <path> [-socket path] - expose file as NBD block device
-//	rawhide <image> freenbd [-rw] [-socket path]    - expose free space as NBD device
+//	rawhide [-K key] [-sz size] <image> [command] [args...]
+//	rawhide <image> ls [-l] [path]                    - list directory or file info
+//	rawhide <image> cat <path>                        - copy file to stdout
+//	rawhide <image> fscat|fs [-K key] <path> [cmd]    - recurse into nested image
+//	rawhide <image> freecat|fc                        - copy free space to stdout
+//	rawhide <image> freefscat|ffs [cmd] [args]        - probe free space as image
+//	rawhide <image> nbd [-rw] <path> [-socket path]   - expose file as NBD block device
+//	rawhide <image> freenbd|fnbd [-rw] [-socket path] - expose free space as NBD device
 package main
 
 import (
@@ -49,19 +49,19 @@ func main() {
 
 func run(args []string, stdout, stderr io.Writer) error {
 	if len(args) < 1 {
-		return fmt.Errorf("usage: rawhide [-K key] [-sector size] <image> [command] [args...]")
+		return fmt.Errorf("usage: rawhide [-K key] [-sz size] <image> [command] [args...]")
 	}
 
 	// Parse encryption flags
 	flagSet := flag.NewFlagSet("rawhide", flag.ContinueOnError)
 	keyHex := flagSet.String("K", "", "XTS-AES key in hexadecimal")
-	sectorSize := flagSet.Int("sector", 512, "Sector size for XTS encryption")
+	sectorSize := flagSet.Int("sz", 512, "Sector size for XTS encryption")
 	if err := flagSet.Parse(args); err != nil {
 		return err
 	}
 
 	if flagSet.NArg() < 1 {
-		return fmt.Errorf("usage: rawhide [-K key] [-sector size] <image> [command] [args...]")
+		return fmt.Errorf("usage: rawhide [-K key] [-sz size] <image> [command] [args...]")
 	}
 
 	imagePath := flagSet.Arg(0)
@@ -146,18 +146,18 @@ func runCommand(filesystem fsys.FS, args []string, stdout, stderr io.Writer) err
 		return runLs(filesystem, cmdArgs, stdout)
 	case "cat":
 		return runCat(filesystem, cmdArgs, stdout)
-	case "fscat":
+	case "fscat", "fs":
 		return runFscat(filesystem, cmdArgs, stdout, stderr)
-	case "freecat":
+	case "freecat", "fc":
 		return runFreeCat(filesystem, stdout)
-	case "freefscat":
+	case "freefscat", "ffs":
 		return runFreeFscat(filesystem, cmdArgs, stdout, stderr)
 	case "nbd":
 		return runNbd(filesystem, cmdArgs, stdout, stderr)
-	case "freenbd":
+	case "freenbd", "fnbd":
 		return runFreeNbd(filesystem, cmdArgs, stdout, stderr)
 	default:
-		return fmt.Errorf("unknown command: %s (use ls, cat, fscat, freecat, freefscat, nbd, freenbd)", command)
+		return fmt.Errorf("unknown command: %s (use ls, cat, fscat|fs, freecat|fc, freefscat|ffs, nbd, freenbd|fnbd)", command)
 	}
 }
 
@@ -202,7 +202,7 @@ func runFscat(filesystem fsys.FS, args []string, stdout, stderr io.Writer) error
 	// Parse encryption flags
 	flagSet := flag.NewFlagSet("fscat", flag.ContinueOnError)
 	keyHex := flagSet.String("K", "", "XTS-AES key in hexadecimal")
-	sectorSize := flagSet.Int("sector", 512, "Sector size for XTS encryption")
+	sectorSize := flagSet.Int("sz", 512, "Sector size for XTS encryption")
 	if err := flagSet.Parse(args); err != nil {
 		return err
 	}
@@ -352,7 +352,7 @@ func runNbd(filesystem fsys.FS, args []string, stdout, stderr io.Writer) error {
 	exportName := flagSet.String("name", "export", "Export name for NBD clients")
 	readWrite := flagSet.Bool("rw", false, "Enable read-write access")
 	keyHex := flagSet.String("K", "", "XTS-AES key in hexadecimal")
-	sectorSize := flagSet.Int("sector", 512, "Sector size for XTS encryption")
+	sectorSize := flagSet.Int("sz", 512, "Sector size for XTS encryption")
 	if err := flagSet.Parse(args); err != nil {
 		return err
 	}
