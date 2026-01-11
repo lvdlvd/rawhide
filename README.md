@@ -1,6 +1,7 @@
 # rawhide
 
-A command-line tool to read files from filesystem images (FAT12/16/32, NTFS, ext2/3/4) without mounting. Also supports MBR and GPT partition tables, with recursive access to nested images.
+A command-line tool to read files from filesystem images (FAT12/16/32, NTFS, ext2/3/4) without mounting. 
+Supports MBR and GPT partition tables, with recursive access to nested images.
 
 ## Features
 
@@ -250,6 +251,3 @@ rawhide
 └── main.go      - CLI
 ```
 
-## License
-
-MIT
