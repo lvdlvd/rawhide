@@ -119,8 +119,8 @@ func (f *FS) parseBPB(header []byte) error {
 	return nil
 }
 
-func (f *FS) Type() string  { return f.typ }
-func (f *FS) Close() error  { return nil }
+func (f *FS) Type() string            { return f.typ }
+func (f *FS) Close() error            { return nil }
 func (f *FS) BaseReader() io.ReaderAt { return f.r }
 
 // FreeBlocks returns the list of free byte ranges in the FAT filesystem.
@@ -370,14 +370,14 @@ func (t *fatTable) isEOF(cluster uint32) bool {
 
 // dirEntry represents a FAT directory entry
 type dirEntry struct {
-	name      string
-	ext       string
-	attr      uint8
-	cluster   uint32
-	size      uint32
-	modTime   time.Time
-	isLFN     bool
-	lfnParts  []string
+	name     string
+	ext      string
+	attr     uint8
+	cluster  uint32
+	size     uint32
+	modTime  time.Time
+	isLFN    bool
+	lfnParts []string
 }
 
 const (
@@ -633,13 +633,13 @@ func (f *FS) Stat(name string) (fs.FileInfo, error) {
 
 // fatFile implements fs.File for regular files
 type fatFile struct {
-	fs      *FS
-	entry   dirEntry
-	name    string
-	parent  uint32
-	data    []byte
-	offset  int64
-	loaded  bool
+	fs     *FS
+	entry  dirEntry
+	name   string
+	parent uint32
+	data   []byte
+	offset int64
+	loaded bool
 }
 
 func (f *fatFile) Stat() (fs.FileInfo, error) {
@@ -672,12 +672,12 @@ func (f *fatFile) Close() error {
 
 // fatDir implements fs.File and fs.ReadDirFile for directories
 type fatDir struct {
-	fs     *FS
-	entry  dirEntry
-	name   string
-	isRoot bool
+	fs      *FS
+	entry   dirEntry
+	name    string
+	isRoot  bool
 	entries []fs.DirEntry
-	offset int
+	offset  int
 }
 
 func (d *fatDir) Stat() (fs.FileInfo, error) {
@@ -745,8 +745,8 @@ type fatDirEntry struct {
 	entry dirEntry
 }
 
-func (e *fatDirEntry) Name() string               { return e.entry.name }
-func (e *fatDirEntry) IsDir() bool                { return e.entry.attr&attrDirectory != 0 }
+func (e *fatDirEntry) Name() string { return e.entry.name }
+func (e *fatDirEntry) IsDir() bool  { return e.entry.attr&attrDirectory != 0 }
 func (e *fatDirEntry) Type() fs.FileMode {
 	if e.IsDir() {
 		return fs.ModeDir
@@ -776,9 +776,4 @@ func (i *fatFileInfo) Mode() fs.FileMode {
 		mode |= fs.ModeDir | 0111
 	}
 	return mode
-}
-
-func init() {
-	// Silence the parseDOSDateTime function - it's defined but Go can't see it's used
-	_ = parseDOSDateTime
 }
